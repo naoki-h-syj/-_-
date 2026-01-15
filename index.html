@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>物流梱包アシスト</title>
+    <style>
+        body { font-family: sans-serif; margin: 20px; background-color: #f4f4f9; }
+        .container { max-width: 400px; margin: auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+        h1 { font-size: 1.2rem; color: #333; text-align: center; }
+        .input-group { margin-bottom: 15px; }
+        label { display: block; font-size: 0.9rem; color: #666; margin-bottom: 5px; }
+        input { width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 5px; box-sizing: border-box; font-size: 1rem; }
+        button { width: 100%; padding: 15px; background-color: #007bff; color: white; border: none; border-radius: 5px; font-size: 1rem; cursor: pointer; }
+        #result { margin-top: 20px; padding: 15px; border-radius: 5px; display: none; }
+        .success { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        .error { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>梱包サイズ判定 (+3cm余裕)</h1>
+    
+    <div class="input-group">
+        <label>幅 (cm)</label>
+        <input type="number" id="width" placeholder="例: 51.2" step="0.1">
+    </div>
+    <div class="input-group">
+        <label>奥行 (cm)</label>
+        <input type="number" id="depth" placeholder="例: 39.5" step="0.1">
+    </div>
+    <div class="input-group">
+        <label>高さ (cm)</label>
+        <input type="number" id="height" placeholder="例: 21.0" step="0.1">
+    </div>
+
+    <button onclick="calculateBox()">最適な箱を判定する</button>
+
+    <div id="result"></div>
+</div>
+
+<script>
+    // 会社で使用している段ボールリスト（内寸）
+    const boxList = [
+        { name: "サイズ60",  w: 25, d: 20, h: 15 },
+        { name: "サイズ80",  w: 35, d: 25, h: 20 },
+        { name: "サイズ100", w: 45, d: 35, h: 20 },
+        { name: "サイズ120", w: 55, d: 40, h: 25 },
+        { name: "サイズ140", w: 65, d: 50, h: 25 },
+        { name: "サイズ160", w: 75, d: 55, h: 30 }
+    ];
+
+    function calculateBox() {
+        // 入力値を取得
+        const w = parseFloat(document.getElementById('width').value);
+        const d = parseFloat(document.getElementById('depth').value);
+        const h = parseFloat(document.getElementById('height').value);
+
+        if (!w || !d || !h) {
+            alert("すべての数値を入力してください");
+            return;
+        }
+
+        // 余裕分 +3cm を加算
+        const buffer = 3;
+        const req = [w + buffer, d + buffer, h + buffer].sort((a, b) => a - b);
+
+        let foundBox = null;
+
+        for (let box of boxList) {
+            const bSides = [box.w, box.d, box.h].sort((a, b) => a - b);
+            
+            // 3辺すべてが収まるかチェック
+            if (req[0] <= bSides[0] && req[1] <= bSides[1] && req[2] <= bSides[2]) {
+                foundBox = box;
+                break;
+            }
+        }
+
+        const resultDiv = document.getElementById('result');
+        resultDiv.style.display = 'block';
+
+        if (foundBox) {
+            resultDiv.className = 'success';
+            resultDiv.innerHTML = `<strong>【${foundBox.name}】が最適です</strong><br>
+                                   (必要サイズ: ${req[2].toFixed(1)} x ${req[1].toFixed(1)} x ${req[0].toFixed(1)}cm)`;
+        } else {
+            resultDiv.className = 'error';
+            resultDiv.innerHTML = "<strong>適合する箱がありません</strong><br>特注または大型パレットを検討してください。";
+        }
+    }
+</script>
+
+</body>
+</html>
