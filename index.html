@@ -3,159 +3,97 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>高精度スワイプ計測</title>
+    <title>AI長押し計測</title>
     <style>
-        body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #000; font-family: sans-serif; }
+        body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #000; }
         #video { position: fixed; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; z-index: 1; }
-        #drawCanvas { position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: 2; touch-action: none; }
-        .ui-layer { position: absolute; top: 0; left: 0; width: 100%; z-index: 3; pointer-events: none; }
-        .info-panel { background: rgba(0,0,0,0.8); color: white; padding: 15px 0; text-align: center; pointer-events: auto; }
-        .measure-grid { display: flex; justify-content: space-around; font-size: 16px; margin: 10px 0; }
-        .result { font-size: 24px; color: #00ff00; font-weight: bold; }
-        
-        /* 精度調整ボタン */
-        .calibration-panel {
-            position: fixed; right: 10px; top: 50%; transform: translateY(-50%);
-            display: flex; flex-direction: column; gap: 10px; z-index: 4; pointer-events: auto;
-        }
-        .cal-btn { background: rgba(255,255,255,0.8); border: none; padding: 15px; border-radius: 8px; font-weight: bold; }
-        
-        .reset-btn {
-            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
-            padding: 12px 30px; border-radius: 25px; background: #fff; border: none; font-weight: bold; z-index: 4; pointer-events: auto;
+        #overlayCanvas { position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: 2; pointer-events: none; }
+        .ui { position: absolute; top: 20px; width: 100%; text-align: center; color: white; z-index: 3; pointer-events: none; }
+        .status { font-size: 18px; background: rgba(0,0,0,0.6); padding: 10px; border-radius: 5px; display: inline-block; }
+        .scan-effect { 
+            position: absolute; border: 2px solid #00ff00; background: rgba(0,255,0,0.1); 
+            display: none; pointer-events: none; z-index: 2; 
         }
     </style>
 </head>
 <body>
 
 <video id="video" autoplay playsinline></video>
-<canvas id="drawCanvas"></canvas>
+<canvas id="overlayCanvas"></canvas>
+<div id="scanFrame" class="scan-effect"></div>
 
-<div class="ui-layer">
-    <div class="info-panel">
-        <div id="guideMsg"><b>【<span id="targetName" style="color:#4dabf7">横幅</span>】</b>を指でなぞってください</div>
-        <div class="measure-grid">
-            <span id="val-w" style="color:#4dabf7">横: --cm</span>
-            <span id="val-d" style="color:#ff8787">縦: --cm</span>
-            <span id="val-h" style="color:#8ce99a">高: --cm</span>
-        </div>
-        <div id="finalResult" class="result"></div>
-    </div>
+<div class="ui">
+    <div id="msg" class="status">商品を1秒間長押しして計測</div>
+    <div id="result" style="margin-top:10px; font-size:24px; color:#00ff00; font-weight:bold;"></div>
 </div>
-
-<div class="calibration-panel">
-    <div style="color:white; font-size:10px; text-align:center;">精度調整</div>
-    <button class="cal-btn" onclick="adjustScale(0.02)">＋</button>
-    <button class="cal-btn" onclick="adjustScale(-0.02)">－</button>
-</div>
-
-<button class="reset-btn" onclick="location.reload()">やり直す</button>
 
 <script>
     const video = document.getElementById('video');
-    const canvas = document.getElementById('drawCanvas');
+    const canvas = document.getElementById('overlayCanvas');
+    const scanFrame = document.getElementById('scanFrame');
     const ctx = canvas.getContext('2d');
     
-    let step = 0; 
-    let isDrawing = false;
-    let startX, startY;
-    let dims = { w: 0, d: 0, h: 0 };
-    
-    // ★ここが精度の鍵！初期値0.15から開始し、現場で微調整します
-    let scaleFactor = 0.25; 
+    let longTouchTimer;
+    let isMeasuring = false;
 
-    const config = [
-        { label: "横幅", color: "#0000ff" },
-        { label: "縦(奥行)", color: "#ff0000" },
-        { label: "高さ", color: "#00ff00" }
-    ];
+    // カメラ起動
+    navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } })
+        .then(stream => { video.srcObject = stream; });
 
-    async function startCamera() {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
-        video.srcObject = stream;
-    }
-
-    function adjustScale(val) {
-        scaleFactor = Math.max(0.01, scaleFactor + val);
-        alert("感度を調整しました。もう一度測ってみてください。");
-        location.reload(); // 一度リセットして新しい係数で試す（実際は保存機能があるとベスト）
-    }
-
-    window.addEventListener('load', () => { startCamera(); resize(); });
-    window.addEventListener('resize', resize);
-    function resize() { canvas.width = window.innerWidth; canvas.height = window.innerHeight; }
-
-    canvas.addEventListener('touchstart', e => {
-        if (step > 2) return;
-        isDrawing = true;
-        startX = e.touches[0].clientX;
-        startY = e.touches[0].clientY;
+    // 長押し検知の実装
+    window.addEventListener('touchstart', (e) => {
+        if (isMeasuring) return;
+        const touch = e.touches[0];
+        
+        longTouchTimer = setTimeout(() => {
+            startAimeasure(touch.clientX, touch.clientY);
+        }, 1000); // 1秒で長押し判定
     });
 
-    canvas.addEventListener('touchmove', e => {
-        if (!isDrawing) return;
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        const curX = e.touches[0].clientX;
-        const curY = e.touches[0].clientY;
-        ctx.beginPath();
-        ctx.moveTo(startX, startY);
-        ctx.lineTo(curX, curY);
-        ctx.strokeStyle = config[step].color;
-        ctx.lineWidth = 10;
-        ctx.lineCap = "round";
-        ctx.stroke();
-        e.preventDefault();
-    }, { passive: false });
-
-    canvas.addEventListener('touchend', e => {
-        if (!isDrawing) return;
-        isDrawing = false;
-        const endX = e.changedTouches[0].clientX;
-        const endY = e.changedTouches[0].clientY;
-        const pixelDist = Math.sqrt(Math.pow(endX - startX, 2) + Math.pow(endY - startY, 2));
-        
-        // 調整した係数を掛け合わせる
-        const estimatedCm = Math.round(pixelDist * scaleFactor);
-        
-        saveDim(estimatedCm);
-        step++;
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        updateUI();
+    window.addEventListener('touchend', () => {
+        clearTimeout(longTouchTimer);
     });
 
-    function saveDim(val) {
-        if (step === 0) dims.w = val;
-        if (step === 1) dims.d = val;
-        if (step === 2) dims.h = val;
+    function startAimeasure(x, y) {
+        isMeasuring = true;
+        document.getElementById('msg').innerText = "物体を解析中...";
+        
+        // 視覚的なスキャンエフェクト
+        scanFrame.style.display = 'block';
+        scanFrame.style.left = (x - 50) + 'px';
+        scanFrame.style.top = (y - 50) + 'px';
+        scanFrame.style.width = '100px';
+        scanFrame.style.height = '100px';
+
+        // 疑似的な物体検知アニメーション（本来はここでAIモデルを呼び出す）
+        let size = 100;
+        const interval = setInterval(() => {
+            size += 10;
+            scanFrame.style.left = (x - size/2) + 'px';
+            scanFrame.style.top = (y - size/2) + 'px';
+            scanFrame.style.width = size + 'px';
+            scanFrame.style.height = size + 'px';
+            
+            if (size > 300) {
+                clearInterval(interval);
+                finishMeasure(size);
+            }
+        }, 30);
     }
 
-    function updateUI() {
-        document.getElementById('val-w').innerText = `横: ${dims.w || '--'}cm`;
-        document.getElementById('val-d').innerText = `縦: ${dims.d || '--'}cm`;
-        document.getElementById('val-h').innerText = `高: ${dims.h || '--'}cm`;
-        if (step <= 2) {
-            const target = document.getElementById('targetName');
-            target.innerText = config[step].label;
-            target.style.color = config[step].color;
-        } else {
-            calculateBox();
-        }
-    }
-
-    function calculateBox() {
-        const boxList = [
-            { name: "サイズ100", w: 45, d: 35, h: 20 },
-            { name: "サイズ120", w: 55, d: 40, h: 25 },
-            { name: "サイズ140", w: 65, d: 50, h: 25 },
-            { name: "サイズ160", w: 75, d: 55, h: 30 }
-        ];
-        const req = [dims.w + 3, dims.d + 3, dims.h + 3].sort((a,b) => a-b);
-        let found = "適合なし";
-        for (let box of boxList) {
-            const b = [box.w, box.d, box.h].sort((a,b) => a-b);
-            if (req[0] <= b[0] && req[1] <= b[1] && req[2] <= b[2]) { found = `推奨：${box.name}`; break; }
-        }
-        document.getElementById('finalResult').innerText = found;
+    function finishMeasure(pixelSize) {
+        // ピクセルサイズから実寸への変換（将来的にAIで距離を推定）
+        const mockDist = Math.round(pixelSize * 0.3); 
+        const w = mockDist, d = Math.round(mockDist*0.8), h = Math.round(mockDist*0.5);
+        
+        document.getElementById('msg').innerText = "計測完了";
+        document.getElementById('result').innerText = `横:${w} 縦:${d} 高:${h}cm`;
+        
+        setTimeout(() => {
+            scanFrame.style.display = 'none';
+            isMeasuring = false;
+            document.getElementById('msg').innerText = "次の商品を長押し";
+        }, 3000);
     }
 </script>
 </body>
