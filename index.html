@@ -2,43 +2,58 @@
 <html lang="ja">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AR物流計測アシスト</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>物流梱包サイズ判定</title>
     <script src="https://aframe.io/releases/1.2.0/aframe.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/gh/donmccurdy/aframe-extras@v6.1.1/dist/aframe-extras.min.js"></script>
+    <script src="https://raw.githack.com/AR-js-org/AR.js/master/aframe/build/aframe-ar.js"></script>
     <style>
-        body { margin: 0; overflow: hidden; font-family: sans-serif; }
-        .ui-panel {
-            position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%);
-            width: 90%; background: rgba(255, 255, 255, 0.9);
-            padding: 15px; border-radius: 15px; z-index: 1000; text-align: center;
+        body { margin: 0; overflow: hidden; font-family: "Hiragino Kaku Gothic ProN", sans-serif; }
+        .ui-overlay {
+            position: absolute; bottom: 0; left: 0; width: 100%;
+            background: rgba(255, 255, 255, 0.95);
+            padding: 20px 0; border-radius: 20px 20px 0 0; z-index: 9999;
+            text-align: center; box-shadow: 0 -5px 15px rgba(0,0,0,0.2);
         }
-        .result-box { font-weight: bold; color: #007bff; font-size: 1.2rem; margin-top: 10px; }
-        .guide-text { font-size: 0.8rem; color: #666; }
-        button { background: #007bff; color: white; border: none; padding: 10px 20px; border-radius: 5px; margin-top: 5px; }
+        .info-text { font-size: 14px; color: #666; margin-bottom: 8px; }
+        .dimension-display { font-size: 18px; font-weight: bold; color: #333; margin-bottom: 15px; }
+        .result-display { font-size: 22px; font-weight: bold; color: #d63384; min-height: 30px; margin-bottom: 15px; }
+        .button-group { display: flex; justify-content: center; gap: 10px; margin-bottom: 15px; }
+        button {
+            padding: 12px 20px; font-size: 16px; border: none; border-radius: 8px;
+            cursor: pointer; font-weight: bold; transition: 0.2s;
+        }
+        .btn-adjust { background: #e9ecef; color: #333; }
+        .btn-adjust:active { background: #dee2e6; }
+        .btn-confirm { background: #007bff; color: white; width: 80%; }
     </style>
 </head>
 <body>
 
-<div class="ui-panel">
-    <div class="guide-text">カメラを物体に向け、サイズを調整してください</div>
-    <div id="dimensions">幅: 30cm | 奥行: 30cm | 高さ: 30cm</div>
-    <div id="best-box" class="result-box">判定待ち...</div>
-    <button onclick="changeSize('w', 5)">幅+5</button>
-    <button onclick="changeSize('w', -5)">幅-5</button>
-    <br>
-    <button onclick="calculateBox()">このサイズで確定</button>
+<div class="ui-overlay">
+    <div class="info-text">青い箱を荷物のサイズに合わせてください</div>
+    <div class="dimension-display" id="dims">幅: 30cm | 奥行: 30cm | 高さ: 30cm</div>
+    <div class="result-display" id="bestBox">判定結果待ち</div>
+    
+    <div class="button-group">
+        <button class="btn-adjust" onclick="changeSize('w', 5)">幅＋</button>
+        <button class="btn-adjust" onclick="changeSize('w', -5)">幅ー</button>
+        <button class="btn-adjust" onclick="changeSize('d', 5)">奥行＋</button>
+        <button class="btn-adjust" onclick="changeSize('d', -5)">奥行ー</button>
+    </div>
+    
+    <button class="btn-confirm" onclick="checkFit()">このサイズで段ボールを判定</button>
 </div>
 
-<a-scene embedded arjs="sourceType: webcam; debugUIEnabled: false;">
-    <a-box id="guideBox" position="0 0 -1" material="color: #007bff; opacity: 0.3; wireframe: false;" scale="0.3 0.3 0.3">
-        <a-text value="MEASURE" position="-0.5 0.6 0" color="black" width="3"></a-text>
+<a-scene embedded arjs="sourceType: webcam; videoSettings: {facingMode: 'environment'}; debugUIEnabled: false;" vr-mode-ui="enabled: false">
+    <a-box id="guide" position="0 0 -1" material="color: #007bff; opacity: 0.4; transparent: true; side: double;" scale="0.3 0.3 0.3">
+        <a-edges-geometry></a-edges-geometry>
+        <a-line material="color: white;"></a-line>
     </a-box>
     <a-entity camera></a-entity>
 </a-scene>
 
 <script>
-    let currentW = 30, currentD = 30, currentH = 30;
+    let w = 30, d = 30, h = 30; // 初期値
 
     const boxList = [
         { name: "サイズ100", w: 45, d: 35, h: 20 },
@@ -48,32 +63,31 @@
     ];
 
     function changeSize(type, val) {
-        if(type === 'w') currentW += val;
-        updateDisplay();
+        if (type === 'w') w = Math.max(5, w + val);
+        if (type === 'd') d = Math.max(5, d + val);
+        updateUI();
     }
 
-    function updateDisplay() {
-        document.getElementById('dimensions').innerText = `幅: ${currentW}cm | 奥行: ${currentD}cm | 高さ: ${currentH}cm`;
-        // 3Dモデルの大きさを変更
-        const box = document.getElementById('guideBox');
-        box.setAttribute('scale', `${currentW/100} ${currentH/100} ${currentD/100}`);
+    function updateUI() {
+        document.getElementById('dims').innerText = `幅: ${w}cm | 奥行: ${d}cm | 高さ: ${h}cm`;
+        const guide = document.getElementById('guide');
+        // A-Frameのscaleに反映 (1 = 1メートル)
+        guide.setAttribute('scale', `${w/100} ${h/100} ${d/100}`);
     }
 
-    function calculateBox() {
+    function checkFit() {
         const buffer = 3;
-        const req = [currentW + buffer, currentD + buffer, currentH + buffer].sort((a, b) => a - b);
-        let foundBox = null;
+        const required = [w + buffer, d + buffer, h + buffer].sort((a, b) => a - b);
+        let result = "適合なし";
 
         for (let box of boxList) {
-            const bSides = [box.w, box.d, box.h].sort((a, b) => a - b);
-            if (req[0] <= bSides[0] && req[1] <= bSides[1] && req[2] <= bSides[2]) {
-                foundBox = box;
+            const bSize = [box.w, box.d, box.h].sort((a, b) => a - b);
+            if (required[0] <= bSize[0] && required[1] <= bSize[1] && required[2] <= bSize[2]) {
+                result = `推奨：${box.name}`;
                 break;
             }
         }
-
-        const resultDiv = document.getElementById('best-box');
-        resultDiv.innerText = foundBox ? `推奨：${foundBox.name}` : "適合なし";
+        document.getElementById('bestBox').innerText = result;
     }
 </script>
 
