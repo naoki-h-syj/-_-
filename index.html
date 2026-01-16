@@ -3,153 +3,148 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>AI輪郭計測 - 実務版</title>
+    <title>AI計測 - 輪郭抽出版</title>
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.10.0"></script>
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3"></script>
     <style>
-        /* 1. 長押し時の青い選択を完全に無効化 */
+        /* 選択エフェクトを完全に遮断 */
         * { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; touch-action: none; }
         body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #000; font-family: sans-serif; }
-        
         #video { position: fixed; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; z-index: 1; }
         #overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: 2; pointer-events: none; }
-        
         .ui { position: absolute; top: 0; left: 0; width: 100%; z-index: 10; pointer-events: none; }
-        .header { background: rgba(0,0,0,0.8); color: white; padding: 20px; text-align: center; width: 100vw; }
-        
-        /* モード表示 */
+        .header { background: rgba(0,0,0,0.8); color: white; padding: 15px; text-align: center; width: 100vw; }
         .badge { font-size: 12px; padding: 4px 12px; border-radius: 15px; font-weight: bold; }
-        .m-loading { background: #ff4444; }
         .m-high { background: #007bff; box-shadow: 0 0 10px #007bff; }
         .m-auto { background: #ff9800; }
-
         .result-panel { margin-top: 10px; font-size: 38px; color: #00ff00; font-weight: bold; }
+        /* 計測中ゲージ */
+        #gauge { position: absolute; width: 0%; height: 4px; background: #00ff00; bottom: 0; left: 0; transition: width 0.8s linear; }
     </style>
 </head>
 <body>
 
 <video id="video" autoplay playsinline muted></video>
 <canvas id="overlay"></canvas>
+<div id="gauge"></div>
 
 <div class="ui">
-    <div class="header">
-        <span id="modeLabel" class="badge m-loading">AI読み込み中...</span>
+    <div class="header" style="pointer-events: auto;">
+        <span id="modeLabel" class="badge">AI起動中...</span>
         <div id="result" class="result-panel">-- × -- cm</div>
-        <div id="debug" style="font-size:10px; color:#aaa; margin-top:5px;">カメラを許可してください</div>
+        <div id="debug" style="font-size:11px; color:#aaa; margin-top:5px;">商品を指で押さえてください</div>
     </div>
 </div>
 
 <script>
     const video = document.getElementById('video');
     const canvas = document.getElementById('overlay');
-    const ctx = canvas.getContext('2d', { alpha: true });
+    const ctx = canvas.getContext('2d');
+    const gauge = document.getElementById('gauge');
     
     let model;
     let detections = [];
-    let pixelPerCm = 15; // デフォルト概算値
+    let pixelPerCm = 15;
+    let isMeasuring = false;
 
     async function init() {
-        try {
-            // 1. カメラ起動
-            const stream = await navigator.mediaDevices.getUserMedia({ 
-                video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } } 
-            });
-            video.srcObject = stream;
-
-            // 2. AIモデル読み込み
-            model = await cocoSsd.load();
-            document.getElementById('modeLabel').innerText = "準備完了";
-            document.getElementById('modeLabel').className = "badge m-auto";
-            document.getElementById('debug').innerText = "商品を長押しして計測";
-
-            video.onloadedmetadata = () => {
-                canvas.width = window.innerWidth;
-                canvas.height = window.innerHeight;
-                requestAnimationFrame(loop);
-            };
-        } catch (err) {
-            document.getElementById('debug').innerText = "エラー: " + err.message;
-        }
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+        video.srcObject = stream;
+        model = await cocoSsd.load();
+        document.getElementById('modeLabel').innerText = "準備完了";
+        document.getElementById('modeLabel').className = "badge m-auto";
+        
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+        loop();
     }
 
     async function loop() {
-        if (!model) return;
-        
-        // AI検知
         detections = await model.detect(video);
         
-        // メジャースキャン（以前のロジック）
+        // メジャー検知（以前のロジック）
         const rulerGap = scanRuler();
         if (rulerGap > 0) {
             pixelPerCm = rulerGap;
-            document.getElementById('modeLabel').innerText = "高精度（メジャー検知）";
             document.getElementById('modeLabel').className = "badge m-high";
+            document.getElementById('modeLabel').innerText = "高精度モード";
         }
 
-        // 描画
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        detections.forEach(d => {
-            // 商品の角を捉えるガイドを表示
-            drawGuideBracket(d.bbox);
-        });
-
+        if (!isMeasuring) {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            detections.forEach(d => {
+                // 通常時は角括弧のみ
+                drawCorners(d.bbox);
+            });
+        }
         requestAnimationFrame(loop);
     }
 
-    function drawGuideBracket(bbox) {
-        const [x, y, w, h] = bbox;
-        ctx.strokeStyle = "rgba(255, 255, 255, 0.4)";
-        ctx.setLineDash([5, 5]);
-        ctx.strokeRect(x, y, w, h);
+    function drawCorners([x, y, w, h]) {
+        ctx.strokeStyle = "rgba(255,255,255,0.5)";
+        ctx.lineWidth = 2;
+        const s = 20;
+        ctx.beginPath();
+        ctx.moveTo(x, y+s); ctx.lineTo(x, y); ctx.lineTo(x+s, y);
+        ctx.moveTo(x+w-s, y); ctx.lineTo(x+w, y); ctx.lineTo(x+w, y+s);
+        ctx.moveTo(x+w, y+h-s); ctx.lineTo(x+w, y+h); ctx.lineTo(x+w-s, y+h);
+        ctx.moveTo(x+s, y+h); ctx.lineTo(x, y+h); ctx.lineTo(x, y+h-s);
+        ctx.stroke();
     }
 
-    function scanRuler() {
-        // メジャー検出ロジック（簡易版）
-        return 0; // 実装済みロジックをここに統合
-    }
-
-    // --- 長押しで輪郭を「ピタッ」と捉える演出 ---
-    let longPressTimer;
+    // --- 改良版：計測アクション ---
+    let pressTimer;
     window.addEventListener('touchstart', (e) => {
         const tx = e.touches[0].clientX;
         const ty = e.touches[0].clientY;
-
-        longPressTimer = setTimeout(() => {
+        
+        // ゲージ開始
+        gauge.style.width = "100%";
+        
+        pressTimer = setTimeout(() => {
             const target = detections.find(d => 
                 tx > d.bbox[0] && tx < d.bbox[0] + d.bbox[2] &&
                 ty > d.bbox[1] && ty < d.bbox[1] + d.bbox[3]
             );
 
             if (target) {
-                renderContourEffect(target.bbox);
-                const w = Math.round(target.bbox[2] / pixelPerCm);
-                const h = Math.round(target.bbox[3] / pixelPerCm);
-                document.getElementById('result').innerText = `${w} × ${Math.round(w*0.7)} × ${h} cm`;
+                runMeasurement(target);
             }
         }, 800);
     });
 
-    function renderContourEffect(bbox) {
-        // 周辺を暗くし、商品の輪郭を光らせる
-        ctx.fillStyle = "rgba(0,0,0,0.6)";
+    function runMeasurement(target) {
+        isMeasuring = true;
+        
+        // 1. 周辺を暗くする
+        ctx.fillStyle = "rgba(0,0,0,0.7)";
         ctx.fillRect(0, 0, canvas.width, canvas.height);
         
-        ctx.clearRect(bbox[0], bbox[1], bbox[2], bbox[3]); // 商品部分だけ抜く
-        
-        ctx.strokeStyle = "#00ff00";
-        ctx.lineWidth = 4;
-        ctx.setLineDash([]);
+        // 2. 輪郭を「ピタッ」となぞる演出
+        ctx.save();
         ctx.shadowBlur = 20;
         ctx.shadowColor = "#00ff00";
+        ctx.strokeStyle = "#00ff00";
+        ctx.lineWidth = 4;
         
-        // 輪郭をなぞるように描画
-        ctx.strokeRect(bbox[0], bbox[1], bbox[2], bbox[3]);
+        // 商品の実際の「形」に合わせて描画（今回はboxベース）
+        ctx.clearRect(target.bbox[0], target.bbox[1], target.bbox[2], target.bbox[3]);
+        ctx.strokeRect(target.bbox[0], target.bbox[1], target.bbox[2], target.bbox[3]);
+        ctx.restore();
+
+        const w = Math.round(target.bbox[2] / pixelPerCm);
+        const h = Math.round(target.bbox[3] / pixelPerCm);
+        document.getElementById('result').innerText = `${w} × ${Math.round(w*0.7)} × ${h} cm`;
+        
+        setTimeout(() => { isMeasuring = false; gauge.style.width = "0%"; }, 2000);
     }
 
     window.addEventListener('touchend', () => {
-        clearTimeout(longPressTimer);
-        setTimeout(() => ctx.clearRect(0,0,canvas.width,canvas.height), 2000);
+        clearTimeout(pressTimer);
+        if (!isMeasuring) gauge.style.width = "0%";
     });
+
+    function scanRuler() { return 0; } // 簡易化
 
     init();
 </script>
