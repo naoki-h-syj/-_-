@@ -3,132 +3,159 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>物流AR計測（距離計算版）</title>
-    <script src="https://aframe.io/releases/1.2.0/aframe.min.js"></script>
-    <script src="https://raw.githack.com/AR-js-org/AR.js/master/aframe/build/aframe-ar.js"></script>
+    <title>物流ARスワイプ計測</title>
     <style>
-        body { margin: 0; overflow: hidden; font-family: sans-serif; }
-        .status-panel {
-            position: absolute; top: 0; left: 0; width: 100%;
-            background: rgba(0,0,0,0.85); color: white;
-            padding: 15px 0; z-index: 1000; text-align: center;
+        body { margin: 0; overflow: hidden; font-family: sans-serif; background: #000; }
+        canvas { display: block; }
+        
+        .ui-layer {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            pointer-events: none; z-index: 10;
         }
-        .guide-msg { font-size: 18px; font-weight: bold; margin-bottom: 8px; }
-        .measure-val { display: flex; justify-content: space-around; font-size: 14px; }
-        .color-w { border-bottom: 4px solid #0000ff; padding-bottom: 2px; }
-        .color-d { border-bottom: 4px solid #ff0000; padding-bottom: 2px; }
-        .color-h { border-bottom: 4px solid #00ff00; padding-bottom: 2px; }
-        .btn-reset {
+        .info-panel {
+            position: absolute; top: 0; width: 100%; background: rgba(0,0,0,0.8);
+            color: white; padding: 15px 0; text-align: center; pointer-events: auto;
+        }
+        .guide { font-size: 18px; font-weight: bold; margin-bottom: 5px; }
+        .measure-grid { display: flex; justify-content: space-around; font-size: 14px; }
+        
+        /* 色の定義 */
+        .w-text { color: #4dabf7; border-bottom: 3px solid #0000ff; } /* 横: 青 */
+        .d-text { color: #ff8787; border-bottom: 3px solid #ff0000; } /* 縦: 赤 */
+        .h-text { color: #8ce99a; border-bottom: 3px solid #00ff00; } /* 高: 緑 */
+
+        .result { margin-top: 10px; font-size: 22px; color: #00ff00; font-weight: bold; }
+        .reset-btn {
             position: absolute; bottom: 30px; left: 50%; transform: translateX(-50%);
-            background: rgba(255,255,255,0.9); color: black; border: none;
-            padding: 12px 30px; border-radius: 25px; z-index: 1000; font-weight: bold;
+            padding: 12px 30px; border-radius: 25px; background: white; border: none;
+            font-weight: bold; pointer-events: auto;
         }
-        .reticle {
-            position: absolute; top: 50%; left: 50%; width: 24px; height: 24px;
-            border: 2px solid #00ff00; border-radius: 50%;
-            transform: translate(-50%, -50%); pointer-events: none; z-index: 1000;
-        }
-        .reticle::after { content: ''; position: absolute; top: 50%; left: 50%; width: 2px; height: 2px; background: #00ff00; transform: translate(-50%, -50%); }
+        /* 描画用キャンバス */
+        #drawCanvas { position: absolute; top: 0; left: 0; pointer-events: auto; }
     </style>
 </head>
-<body onclick="handleTap()">
+<body>
 
-<div class="status-panel">
-    <div id="guideMsg" class="guide-msg">
-        <span style="color:#4dabf7;">【横(幅)】</span> の両端をタップ
+<video id="video" autoplay playsinline style="width:100%; height:100%; object-fit:cover;"></video>
+<canvas id="drawCanvas"></canvas>
+
+<div class="ui-layer">
+    <div class="info-panel">
+        <div id="guideMsg" class="guide">指で <span id="targetName" style="text-decoration:underline;">横幅</span> をなぞってください</div>
+        <div class="measure-grid">
+            <span id="val-w" class="w-text">横: --cm</span>
+            <span id="val-d" class="d-text">縦: --cm</span>
+            <span id="val-h" class="h-text">高: --cm</span>
+        </div>
+        <div id="finalResult" class="result"></div>
+        <button class="reset-btn" onclick="location.reload()">やり直す</button>
     </div>
-    <div class="measure-val">
-        <span id="label-w" class="color-w">横: --cm</span>
-        <span id="label-d" class="color-d">縦: --cm</span>
-        <span id="label-h" class="color-h">高: --cm</span>
-    </div>
-    <div id="resultBox" style="margin-top:10px; font-size:22px; color:#00ff00; font-weight:bold; min-height:28px;"></div>
 </div>
 
-<div class="reticle"></div>
-<button class="btn-reset" onclick="location.reload()">やり直す</button>
-
-<a-scene embedded arjs="sourceType: webcam; debugUIEnabled: false;" vr-mode-ui="enabled: false">
-    <a-entity camera look-controls="enabled: false"></a-entity>
-    <a-entity id="linesGroup"></a-entity>
-    <a-sphere id="tempPoint" visible="false" radius="0.01"></a-sphere>
-</a-scene>
-
 <script>
-    let step = 0; 
-    let isMeasuring = false;
-    let startQuat = null; // 1点目のカメラの向き（回転）
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('drawCanvas');
+    const ctx = canvas.getContext('2d');
+    
+    let step = 0; // 0:W, 1:D, 2:H
+    let isDrawing = false;
+    let startX, startY;
     let dims = { w: 0, d: 0, h: 0 };
     
-    const colors = ["#0000ff", "#ff0000", "#00ff00"];
-    const labels = ["横(幅)", "縦(奥行)", "高さ"];
+    const config = [
+        { label: "横幅", color: "#0000ff" },
+        { label: "縦(奥行)", color: "#ff0000" },
+        { label: "高さ", color: "#00ff00" }
+    ];
 
-    function handleTap() {
-        if (step > 2) return;
+    // カメラ起動
+    navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } })
+        .then(stream => { video.srcObject = stream; })
+        .catch(err => alert("カメラを許可してください"));
 
-        const camera = document.querySelector('[camera]').object3D;
-        
-        if (!isMeasuring) {
-            // 1点目：現在のカメラの回転情報を記録
-            startQuat = camera.quaternion.clone();
-            isMeasuring = true;
-            document.getElementById('guideMsg').innerHTML = `<span style="color:${colors[step]};">【${labels[step]}】</span> の反対側をタップ`;
-        } else {
-            // 2点目：1点目との「角度の差」を計算
-            const endQuat = camera.quaternion.clone();
-            const angle = startQuat.angleTo(endQuat); // ラジアン単位の角度差
-            
-            // 距離推定ロジック（物体まで約50cm離れていると仮定した簡易計算）
-            // 角度差（ラジアン） × 物体までの距離 = 弧の長さ（辺の長さ）
-            const estimatedDist = Math.round(angle * 65); // 65は調整係数
-            
-            saveDimension(Math.max(5, estimatedDist));
-            
-            isMeasuring = false;
-            step++;
-            updateUI();
-        }
+    function resize() {
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
     }
+    window.onresize = resize;
+    resize();
 
-    function saveDimension(val) {
-        if (step === 0) dims.w = val;
-        if (step === 1) dims.d = val;
-        if (step === 2) dims.h = val;
+    // スワイプ操作
+    canvas.addEventListener('touchstart', e => {
+        if (step > 2) return;
+        isDrawing = true;
+        startX = e.touches[0].clientX;
+        startY = e.touches[0].clientY;
+    });
+
+    canvas.addEventListener('touchmove', e => {
+        if (!isDrawing) return;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        const curX = e.touches[0].clientX;
+        const curY = e.touches[0].clientY;
+        
+        // ラインの描画
+        ctx.beginPath();
+        ctx.moveTo(startX, startY);
+        ctx.lineTo(curX, curY);
+        ctx.strokeStyle = config[step].color;
+        ctx.lineWidth = 5;
+        ctx.lineCap = "round";
+        ctx.stroke();
+    });
+
+    canvas.addEventListener('touchend', e => {
+        if (!isDrawing) return;
+        isDrawing = false;
+        
+        const endX = e.changedTouches[0].clientX;
+        const endY = e.changedTouches[0].clientY;
+        
+        // 画面上のピクセル距離からcmを推定 (iPhoneの画面幅を基準とした簡易換算)
+        const pixelDist = Math.sqrt(Math.pow(endX - startX, 2) + Math.pow(endY - startY, 2));
+        const estimatedCm = Math.round(pixelDist * 0.15); // 0.15は調整係数
+        
+        saveDim(estimatedCm);
+        step++;
+        ctx.clearRect(0, 0, canvas.width, canvas.height); // ラインを消す（次のステップへ）
+        updateUI();
+    });
+
+    function saveDim(val) {
+        const v = Math.max(5, val);
+        if (step === 0) dims.w = v;
+        if (step === 1) dims.d = v;
+        if (step === 2) dims.h = v;
     }
 
     function updateUI() {
-        document.getElementById('label-w').innerText = `横: ${dims.w || '--'}cm`;
-        document.getElementById('label-d').innerText = `縦: ${dims.d || '--'}cm`;
-        document.getElementById('label-h').innerText = `高: ${dims.h || '--'}cm`;
+        document.getElementById('val-w').innerText = `横: ${dims.w || '--'}cm`;
+        document.getElementById('val-d').innerText = `縦: ${dims.d || '--'}cm`;
+        document.getElementById('val-h').innerText = `高: ${dims.h || '--'}cm`;
 
         if (step <= 2) {
-            document.getElementById('guideMsg').innerHTML = `<span style="color:${colors[step]};">【${labels[step]}】</span> の両端をタップ`;
+            document.getElementById('targetName').innerText = config[step].label;
+            document.getElementById('targetName').style.color = config[step].color;
         } else {
-            calculateFinal();
+            document.getElementById('guideMsg').innerText = "計測完了！";
+            calculateBox();
         }
     }
 
-    function calculateFinal() {
+    function calculateBox() {
         const boxList = [
             { name: "サイズ100", w: 45, d: 35, h: 20 },
             { name: "サイズ120", w: 55, d: 40, h: 25 },
             { name: "サイズ140", w: 65, d: 50, h: 25 },
             { name: "サイズ160", w: 75, d: 55, h: 30 }
         ];
-        // 3辺をソートして比較
         const req = [dims.w + 3, dims.d + 3, dims.h + 3].sort((a,b) => a-b);
-        let found = "適合する箱がありません";
-        
+        let found = "適合なし";
         for (let box of boxList) {
-            const bSize = [box.w, box.d, box.h].sort((a,b) => a-b);
-            if (req[0] <= bSize[0] && req[1] <= bSize[1] && req[2] <= bSize[2]) {
+            const b = [box.w, box.d, box.h].sort((a,b) => a-b);
+            if (req[0] <= b[0] && req[1] <= b[1] && req[2] <= b[2]) {
                 found = `推奨：${box.name}`;
                 break;
             }
         }
-        document.getElementById('guideMsg').innerText = "計測完了！";
-        document.getElementById('resultBox').innerText = found;
-    }
-</script>
-</body>
-</html>
+        document.getElementById('finalResult').innerText = found;
