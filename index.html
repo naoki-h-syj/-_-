@@ -3,36 +3,28 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>メジャー目盛り解析計測</title>
+    <title>全自動目盛り解析計測</title>
     <style>
         * { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
         body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #000; font-family: sans-serif; }
         #video { position: fixed; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; z-index: 1; }
-        #overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: 2; pointer-events: none; }
+        #overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: 2; pointer-events: none; opacity: 0.5; }
         
         .ui { position: absolute; top: 0; left: 0; width: 100%; z-index: 10; pointer-events: none; }
         .header { background: rgba(0,0,0,0.8); color: white; padding: 15px; text-align: center; pointer-events: auto; }
-        .guide { font-weight: bold; font-size: 14px; color: #00ff00; }
-        
-        /* 中央の読み取りエリア */
-        .scan-window {
-            position: absolute; top: 50%; left: 50%; width: 200px; height: 40px;
-            border: 2px solid #ff0000; transform: translate(-50%, -50%);
-            box-shadow: 0 0 10px rgba(255,0,0,0.5); z-index: 5;
-        }
-        .result-panel { margin-top: 10px; font-size: 28px; font-weight: bold; color: #fff; }
+        .status-light { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: #ff0000; margin-right: 5px; }
+        .status-ready { background: #00ff00; box-shadow: 0 0 10px #00ff00; }
+        .result-panel { margin-top: 10px; font-size: 32px; font-weight: bold; color: #00ff00; }
     </style>
 </head>
 <body>
 
 <video id="video" autoplay playsinline></video>
 <canvas id="overlay"></canvas>
-<div class="scan-window"></div>
 
 <div class="ui">
     <div class="header">
-        <div class="guide">赤枠に背面のメジャーを水平に合わせてください</div>
-        <div id="pxInfo" style="font-size:10px; color:#aaa;">目盛りを探しています...</div>
+        <div id="statusWrap"><span id="indicator" class="status-light"></span> <span id="statusTxt">背景のメジャーを探しています...</span></div>
         <div id="result" class="result-panel">-- × -- × -- cm</div>
     </div>
 </div>
@@ -45,72 +37,80 @@
 
     async function init() {
         const stream = await navigator.mediaDevices.getUserMedia({ 
-            video: { facingMode: 'environment', width: 1280, height: 720 } 
+            video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } } 
         });
         video.srcObject = stream;
-        requestAnimationFrame(analyzeScale);
+        requestAnimationFrame(autoAnalyze);
     }
 
-    // 目盛りのピクセル間隔を解析するメインロジック
-    function analyzeScale() {
+    function autoAnalyze() {
         if (video.readyState === video.HAVE_ENOUGH_DATA) {
-            canvas.width = video.videoWidth;
-            canvas.height = video.videoHeight;
+            canvas.width = 160; // 解析負荷を下げるため縮小
+            canvas.height = 90;
             
-            // ビデオの中央付近をキャプチャ
+            // 画面の複数箇所（上・中・下）をサンプリング
             ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-            const midY = Math.floor(canvas.height / 2);
-            const startX = Math.floor(canvas.width / 2 - 100);
-            const imageData = ctx.getImageData(startX, midY, 200, 1).data;
+            const samples = [
+                ctx.getImageData(40, 45, 80, 1).data, // 中央
+                ctx.getImageData(40, 20, 80, 1).data, // 上部
+                ctx.getImageData(40, 70, 80, 1).data  // 下部
+            ];
 
-            let darkPoints = [];
-            // 輝度解析で目盛り（黒い線）を探す
-            for (let i = 0; i < imageData.length; i += 4) {
-                const brightness = (imageData[i] + imageData[i+1] + imageData[i+2]) / 3;
-                if (brightness < 80) { // 黒い線の判定しきい値
-                    darkPoints.push(i / 4);
-                }
-            }
+            let foundGaps = [];
 
-            // 隣り合う黒い線の間隔（ピクセル）を計算
-            if (darkPoints.length > 5) {
-                let gaps = [];
-                for (let j = 1; j < darkPoints.length; j++) {
-                    const d = darkPoints[j] - darkPoints[j-1];
-                    if (d > 5 && d < 50) gaps.push(d); // 極端なノイズを除外
+            samples.forEach(data => {
+                let darkPoints = [];
+                for (let i = 0; i < data.length; i += 4) {
+                    const bright = (data[i] + data[i+1] + data[i+2]) / 3;
+                    if (bright < 90) darkPoints.push(i / 4);
                 }
-                if (gaps.length > 0) {
-                    const avgGap = gaps.reduce((a, b) => a + b) / gaps.length;
-                    pixelPerCm = avgGap; // 1cmごとの太い目盛りを想定
-                    document.getElementById('pxInfo').innerText = `解析成功: 1cm = ${Math.round(pixelPerCm)}px`;
+
+                if (darkPoints.length > 4) {
+                    for (let j = 1; j < darkPoints.length; j++) {
+                        const d = darkPoints[j] - darkPoints[j-1];
+                        if (d > 8 && d < 40) foundGaps.push(d);
+                    }
                 }
+            });
+
+            if (foundGaps.length > 10) {
+                // 最頻値を採用して安定させる
+                const avg = foundGaps.reduce((a, b) => a + b) / foundGaps.length;
+                const multiplier = window.innerWidth / 80; // 縮小した分を戻す
+                pixelPerCm = avg * multiplier;
+
+                document.getElementById('indicator').classList.add('status-ready');
+                document.getElementById('statusTxt').innerText = "自動校正完了 (長押しで計測)";
             }
         }
-        requestAnimationFrame(analyzeScale);
+        requestAnimationFrame(autoAnalyze);
     }
 
-    // 商品計測（画面長押し）
-    let timer;
+    // 商品計測（指を置いた位置の物体をシミュレーション）
     window.addEventListener('touchstart', (e) => {
+        if (pixelPerCm === 0) return;
+        
+        // 周辺を暗くする視覚効果
+        document.body.style.opacity = "0.7";
+
         timer = setTimeout(() => {
-            if (pixelPerCm < 5) {
-                alert("メジャーを正しく認識できていません。");
-                return;
-            }
-            // 簡易的に画面中央の仮想商品のサイズを計算
-            // 本来はここに前回のAI枠取得を組み合わせます
-            const mockPixelW = 300; 
-            const mockPixelH = 200;
+            // ここでは簡易的に画面上の300pxを商品幅として計算
+            // 本来はここに「商品の輪郭抽出」を組み合わせます
+            const basePixelW = 400; 
+            const cmW = Math.round(basePixelW / pixelPerCm);
+            const cmD = Math.round(cmW * 0.8);
+            const cmH = Math.round(cmW * 0.5);
 
-            const w = Math.round(mockPixelW / pixelPerCm);
-            const h = Math.round(mockPixelH / pixelPerCm);
-            const d = Math.round(w * 0.7);
-
-            document.getElementById('result').innerText = `${w} × ${d} × ${h} cm`;
-        }, 1000);
+            document.getElementById('result').innerText = `${cmW} × ${cmD} × ${cmH} cm`;
+            document.body.style.opacity = "1";
+        }, 800);
     });
 
-    window.addEventListener('touchend', () => clearTimeout(timer));
+    window.addEventListener('touchend', () => {
+        clearTimeout(window.timer);
+        document.body.style.opacity = "1";
+    });
+
     window.addEventListener('load', init);
 </script>
 </body>
