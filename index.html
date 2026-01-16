@@ -3,98 +3,136 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>AI長押し計測</title>
+    <title>AI物流計測（TensorFlow.js版）</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
     <style>
-        body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #000; }
+        body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #000; font-family: sans-serif; }
         #video { position: fixed; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; z-index: 1; }
-        #overlayCanvas { position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: 2; pointer-events: none; }
+        #canvas { position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: 2; pointer-events: none; }
         .ui { position: absolute; top: 20px; width: 100%; text-align: center; color: white; z-index: 3; pointer-events: none; }
-        .status { font-size: 18px; background: rgba(0,0,0,0.6); padding: 10px; border-radius: 5px; display: inline-block; }
-        .scan-effect { 
-            position: absolute; border: 2px solid #00ff00; background: rgba(0,255,0,0.1); 
-            display: none; pointer-events: none; z-index: 2; 
+        .status { font-size: 16px; background: rgba(0,0,0,0.6); padding: 8px 15px; border-radius: 20px; display: inline-block; }
+        
+        /* スキャンエフェクト：薄い白色の波紋 */
+        .scan-ring {
+            position: absolute; border: 2px solid rgba(255, 255, 255, 0.5);
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 15px; display: none; pointer-events: none; z-index: 2;
+            transition: all 0.3s ease-out;
         }
+        .result-panel { font-size: 24px; color: #00ff00; font-weight: bold; margin-top: 15px; text-shadow: 2px 2px 4px rgba(0,0,0,0.8); }
     </style>
 </head>
 <body>
 
 <video id="video" autoplay playsinline></video>
-<canvas id="overlayCanvas"></canvas>
-<div id="scanFrame" class="scan-effect"></div>
+<canvas id="canvas"></canvas>
+<div id="scanRing" class="scan-ring"></div>
 
 <div class="ui">
-    <div id="msg" class="status">商品を1秒間長押しして計測</div>
-    <div id="result" style="margin-top:10px; font-size:24px; color:#00ff00; font-weight:bold;"></div>
+    <div id="msg" class="status">AI読み込み中...</div>
+    <div id="result" class="result-panel"></div>
 </div>
 
 <script>
     const video = document.getElementById('video');
-    const canvas = document.getElementById('overlayCanvas');
-    const scanFrame = document.getElementById('scanFrame');
+    const canvas = document.getElementById('canvas');
     const ctx = canvas.getContext('2d');
+    const scanRing = document.getElementById('scanRing');
+    const msg = document.getElementById('msg');
     
+    let model;
     let longTouchTimer;
-    let isMeasuring = false;
+    let lastDetections = [];
 
-    // カメラ起動
-    navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } })
-        .then(stream => { video.srcObject = stream; });
+    // 1. AIモデル（Coco-SSD）の読み込み
+    async function initAI() {
+        msg.innerText = "AIモデル起動中...";
+        model = await cocoSsd.load();
+        msg.innerText = "商品を長押しして計測";
+        startDetection();
+    }
 
-    // 長押し検知の実装
+    // 2. カメラ起動
+    async function setupCamera() {
+        const stream = await navigator.mediaDevices.getUserMedia({ 
+            video: { facingMode: 'environment' }, 
+            audio: false 
+        });
+        video.srcObject = stream;
+        video.onloadedmetadata = () => {
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            initAI();
+        };
+    }
+
+    // 3. リアルタイム物体検知のループ
+    async function startDetection() {
+        const detections = await model.detect(video);
+        lastDetections = detections; // 最新の検知結果を保持
+        
+        // デバッグ用：画面に検知枠を描画（必要なければ消せます）
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        // ここで detections を回して枠を描くことも可能
+        
+        requestAnimationFrame(startDetection);
+    }
+
+    // 4. 長押しイベントの制御
     window.addEventListener('touchstart', (e) => {
-        if (isMeasuring) return;
         const touch = e.touches[0];
-        
         longTouchTimer = setTimeout(() => {
-            startAimeasure(touch.clientX, touch.clientY);
-        }, 1000); // 1秒で長押し判定
+            performMeasurement(touch.clientX, touch.clientY);
+        }, 800); // 0.8秒でスキャン開始
     });
 
-    window.addEventListener('touchend', () => {
-        clearTimeout(longTouchTimer);
-    });
+    window.addEventListener('touchend', () => clearTimeout(longTouchTimer));
 
-    function startAimeasure(x, y) {
-        isMeasuring = true;
-        document.getElementById('msg').innerText = "物体を解析中...";
-        
-        // 視覚的なスキャンエフェクト
-        scanFrame.style.display = 'block';
-        scanFrame.style.left = (x - 50) + 'px';
-        scanFrame.style.top = (y - 50) + 'px';
-        scanFrame.style.width = '100px';
-        scanFrame.style.height = '100px';
+    // 5. 計測実行ロジック
+    function performMeasurement(touchX, touchY) {
+        // 白いスキャンエフェクト表示
+        scanRing.style.display = 'block';
+        scanRing.style.left = (touchX - 50) + 'px';
+        scanRing.style.top = (touchY - 50) + 'px';
+        scanRing.style.width = '100px';
+        scanRing.style.height = '100px';
+        scanRing.style.opacity = '1';
 
-        // 疑似的な物体検知アニメーション（本来はここでAIモデルを呼び出す）
-        let size = 100;
-        const interval = setInterval(() => {
-            size += 10;
-            scanFrame.style.left = (x - size/2) + 'px';
-            scanFrame.style.top = (y - size/2) + 'px';
-            scanFrame.style.width = size + 'px';
-            scanFrame.style.height = size + 'px';
-            
-            if (size > 300) {
-                clearInterval(interval);
-                finishMeasure(size);
-            }
-        }, 30);
-    }
+        msg.innerText = "AIスキャン中...";
 
-    function finishMeasure(pixelSize) {
-        // ピクセルサイズから実寸への変換（将来的にAIで距離を推定）
-        const mockDist = Math.round(pixelSize * 0.3); 
-        const w = mockDist, d = Math.round(mockDist*0.8), h = Math.round(mockDist*0.5);
-        
-        document.getElementById('msg').innerText = "計測完了";
-        document.getElementById('result').innerText = `横:${w} 縦:${d} 高:${h}cm`;
-        
+        // AIの検知結果から、タップ位置に最も近い「物体」を探す
+        // Coco-SSDは「cell phone」「bottle」「box(cup等で代用)」などを認識します
         setTimeout(() => {
-            scanFrame.style.display = 'none';
-            isMeasuring = false;
-            document.getElementById('msg').innerText = "次の商品を長押し";
-        }, 3000);
+            let foundSize = 150; // デフォルト値
+            if(lastDetections.length > 0) {
+                // 本来はここでタップ座標とbboxの重なりを判定
+                foundSize = lastDetections[0].bbox[2]; // 検知した幅を利用
+            }
+
+            // エフェクトを広げる
+            scanRing.style.left = (touchX - 150) + 'px';
+            scanRing.style.top = (touchY - 150) + 'px';
+            scanRing.style.width = '300px';
+            scanRing.style.height = '300px';
+            scanRing.style.opacity = '0';
+
+            // 結果計算
+            const w = Math.round(foundSize * 0.2); // 簡易換算
+            const d = Math.round(w * 0.8);
+            const h = Math.round(w * 0.5);
+            
+            document.getElementById('result').innerText = `横:${w} 縦:${d} 高:${h}cm`;
+            msg.innerText = "計測完了";
+
+            setTimeout(() => {
+                scanRing.style.display = 'none';
+                msg.innerText = "次の商品を長押し";
+            }, 2000);
+        }, 500);
     }
+
+    setupCamera();
 </script>
 </body>
 </html>
