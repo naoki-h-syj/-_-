@@ -104,3 +104,80 @@
         isDrawing = true;
         startX = e.touches[0].clientX;
         startY = e.touches[0].clientY;
+    });
+
+    canvas.addEventListener('touchmove', e => {
+        if (!isDrawing) return;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        const curX = e.touches[0].clientX;
+        const curY = e.touches[0].clientY;
+        
+        ctx.beginPath();
+        ctx.moveTo(startX, startY);
+        ctx.lineTo(curX, curY);
+        ctx.strokeStyle = config[step].color;
+        ctx.lineWidth = 8; // 線を少し太くして見やすく
+        ctx.lineCap = "round";
+        ctx.stroke();
+        e.preventDefault(); // スクロール防止
+    }, { passive: false });
+
+    canvas.addEventListener('touchend', e => {
+        if (!isDrawing) return;
+        isDrawing = false;
+        
+        const endX = e.changedTouches[0].clientX;
+        const endY = e.changedTouches[0].clientY;
+        
+        const pixelDist = Math.sqrt(Math.pow(endX - startX, 2) + Math.pow(endY - startY, 2));
+        const estimatedCm = Math.round(pixelDist * 0.15); // 換算係数
+        
+        saveDim(estimatedCm);
+        step++;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        updateUI();
+    });
+
+    function saveDim(val) {
+        const v = Math.max(5, val);
+        if (step === 0) dims.w = v;
+        if (step === 1) dims.d = v;
+        if (step === 2) dims.h = v;
+    }
+
+    function updateUI() {
+        document.getElementById('val-w').innerText = `横: ${dims.w || '--'}cm`;
+        document.getElementById('val-d').innerText = `縦: ${dims.d || '--'}cm`;
+        document.getElementById('val-h').innerText = `高: ${dims.h || '--'}cm`;
+
+        if (step <= 2) {
+            const target = document.getElementById('targetName');
+            target.innerText = config[step].label;
+            target.style.color = config[step].color;
+        } else {
+            document.getElementById('guideMsg').innerText = "計測完了！";
+            calculateBox();
+        }
+    }
+
+    function calculateBox() {
+        const boxList = [
+            { name: "サイズ100", w: 45, d: 35, h: 20 },
+            { name: "サイズ120", w: 55, d: 40, h: 25 },
+            { name: "サイズ140", w: 65, d: 50, h: 25 },
+            { name: "サイズ160", w: 75, d: 55, h: 30 }
+        ];
+        const req = [dims.w + 3, dims.d + 3, dims.h + 3].sort((a,b) => a-b);
+        let found = "適合なし";
+        for (let box of boxList) {
+            const b = [box.w, box.d, box.h].sort((a,b) => a-b);
+            if (req[0] <= b[0] && req[1] <= b[1] && req[2] <= b[2]) {
+                found = `推奨：${box.name}`;
+                break;
+            }
+        }
+        document.getElementById('finalResult').innerText = found;
+    }
+</script>
+</body>
+</html>
