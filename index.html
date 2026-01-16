@@ -3,39 +3,26 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>物流スワイプ計測</title>
+    <title>高精度スワイプ計測</title>
     <style>
-        /* カメラ映像を全画面で背面に固定 */
-        body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #000; }
-        #video {
-            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-            object-fit: cover; z-index: 1;
+        body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #000; font-family: sans-serif; }
+        #video { position: fixed; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; z-index: 1; }
+        #drawCanvas { position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: 2; touch-action: none; }
+        .ui-layer { position: absolute; top: 0; left: 0; width: 100%; z-index: 3; pointer-events: none; }
+        .info-panel { background: rgba(0,0,0,0.8); color: white; padding: 15px 0; text-align: center; pointer-events: auto; }
+        .measure-grid { display: flex; justify-content: space-around; font-size: 16px; margin: 10px 0; }
+        .result { font-size: 24px; color: #00ff00; font-weight: bold; }
+        
+        /* 精度調整ボタン */
+        .calibration-panel {
+            position: fixed; right: 10px; top: 50%; transform: translateY(-50%);
+            display: flex; flex-direction: column; gap: 10px; z-index: 4; pointer-events: auto;
         }
-        /* 描画用キャンバスをビデオの上に重ねる */
-        #drawCanvas {
-            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-            z-index: 2; touch-action: none;
-        }
-        /* UIを最前面に配置 */
-        .ui-layer {
-            position: absolute; top: 0; left: 0; width: 100%;
-            z-index: 3; pointer-events: none;
-        }
-        .info-panel {
-            background: rgba(0,0,0,0.7); color: white; padding: 20px 0;
-            text-align: center; pointer-events: auto;
-        }
-        .guide { font-size: 18px; font-weight: bold; margin-bottom: 10px; }
-        .measure-grid { display: flex; justify-content: space-around; font-size: 15px; }
-        .w-text { color: #4dabf7; font-weight: bold; }
-        .d-text { color: #ff8787; font-weight: bold; }
-        .h-text { color: #8ce99a; font-weight: bold; }
-        .result { margin-top: 15px; font-size: 24px; color: #00ff00; font-weight: bold; }
+        .cal-btn { background: rgba(255,255,255,0.8); border: none; padding: 15px; border-radius: 8px; font-weight: bold; }
+        
         .reset-btn {
-            position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%);
-            padding: 15px 40px; border-radius: 30px; background: white; border: none;
-            font-weight: bold; font-size: 16px; z-index: 4; pointer-events: auto;
-            box-shadow: 0 4px 10px rgba(0,0,0,0.3);
+            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+            padding: 12px 30px; border-radius: 25px; background: #fff; border: none; font-weight: bold; z-index: 4; pointer-events: auto;
         }
     </style>
 </head>
@@ -46,14 +33,20 @@
 
 <div class="ui-layer">
     <div class="info-panel">
-        <div id="guideMsg" class="guide">指で <span id="targetName" style="text-decoration:underline; color:#4dabf7;">横幅</span> をなぞってください</div>
+        <div id="guideMsg"><b>【<span id="targetName" style="color:#4dabf7">横幅</span>】</b>を指でなぞってください</div>
         <div class="measure-grid">
-            <span id="val-w" class="w-text">横: --cm</span>
-            <span id="val-d" class="d-text">縦: --cm</span>
-            <span id="val-h" class="h-text">高: --cm</span>
+            <span id="val-w" style="color:#4dabf7">横: --cm</span>
+            <span id="val-d" style="color:#ff8787">縦: --cm</span>
+            <span id="val-h" style="color:#8ce99a">高: --cm</span>
         </div>
         <div id="finalResult" class="result"></div>
     </div>
+</div>
+
+<div class="calibration-panel">
+    <div style="color:white; font-size:10px; text-align:center;">精度調整</div>
+    <button class="cal-btn" onclick="adjustScale(0.02)">＋</button>
+    <button class="cal-btn" onclick="adjustScale(-0.02)">－</button>
 </div>
 
 <button class="reset-btn" onclick="location.reload()">やり直す</button>
@@ -68,37 +61,30 @@
     let startX, startY;
     let dims = { w: 0, d: 0, h: 0 };
     
+    // ★ここが精度の鍵！初期値0.15から開始し、現場で微調整します
+    let scaleFactor = 0.25; 
+
     const config = [
         { label: "横幅", color: "#0000ff" },
         { label: "縦(奥行)", color: "#ff0000" },
         { label: "高さ", color: "#00ff00" }
     ];
 
-    // カメラ起動処理
     async function startCamera() {
-        try {
-            const stream = await navigator.mediaDevices.getUserMedia({ 
-                video: { facingMode: 'environment' }, 
-                audio: false 
-            });
-            video.srcObject = stream;
-        } catch (err) {
-            alert("カメラの起動に失敗しました。ブラウザの設定でカメラを許可してください。");
-        }
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
+        video.srcObject = stream;
     }
 
-    function resize() {
-        canvas.width = window.innerWidth;
-        canvas.height = window.innerHeight;
+    function adjustScale(val) {
+        scaleFactor = Math.max(0.01, scaleFactor + val);
+        alert("感度を調整しました。もう一度測ってみてください。");
+        location.reload(); // 一度リセットして新しい係数で試す（実際は保存機能があるとベスト）
     }
 
-    window.addEventListener('load', () => {
-        startCamera();
-        resize();
-    });
+    window.addEventListener('load', () => { startCamera(); resize(); });
     window.addEventListener('resize', resize);
+    function resize() { canvas.width = window.innerWidth; canvas.height = window.innerHeight; }
 
-    // スワイプ操作（Touch Events）
     canvas.addEventListener('touchstart', e => {
         if (step > 2) return;
         isDrawing = true;
@@ -111,26 +97,25 @@
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         const curX = e.touches[0].clientX;
         const curY = e.touches[0].clientY;
-        
         ctx.beginPath();
         ctx.moveTo(startX, startY);
         ctx.lineTo(curX, curY);
         ctx.strokeStyle = config[step].color;
-        ctx.lineWidth = 8; // 線を少し太くして見やすく
+        ctx.lineWidth = 10;
         ctx.lineCap = "round";
         ctx.stroke();
-        e.preventDefault(); // スクロール防止
+        e.preventDefault();
     }, { passive: false });
 
     canvas.addEventListener('touchend', e => {
         if (!isDrawing) return;
         isDrawing = false;
-        
         const endX = e.changedTouches[0].clientX;
         const endY = e.changedTouches[0].clientY;
-        
         const pixelDist = Math.sqrt(Math.pow(endX - startX, 2) + Math.pow(endY - startY, 2));
-        const estimatedCm = Math.round(pixelDist * 0.15); // 換算係数
+        
+        // 調整した係数を掛け合わせる
+        const estimatedCm = Math.round(pixelDist * scaleFactor);
         
         saveDim(estimatedCm);
         step++;
@@ -139,23 +124,20 @@
     });
 
     function saveDim(val) {
-        const v = Math.max(5, val);
-        if (step === 0) dims.w = v;
-        if (step === 1) dims.d = v;
-        if (step === 2) dims.h = v;
+        if (step === 0) dims.w = val;
+        if (step === 1) dims.d = val;
+        if (step === 2) dims.h = val;
     }
 
     function updateUI() {
         document.getElementById('val-w').innerText = `横: ${dims.w || '--'}cm`;
         document.getElementById('val-d').innerText = `縦: ${dims.d || '--'}cm`;
         document.getElementById('val-h').innerText = `高: ${dims.h || '--'}cm`;
-
         if (step <= 2) {
             const target = document.getElementById('targetName');
             target.innerText = config[step].label;
             target.style.color = config[step].color;
         } else {
-            document.getElementById('guideMsg').innerText = "計測完了！";
             calculateBox();
         }
     }
@@ -171,10 +153,7 @@
         let found = "適合なし";
         for (let box of boxList) {
             const b = [box.w, box.d, box.h].sort((a,b) => a-b);
-            if (req[0] <= b[0] && req[1] <= b[1] && req[2] <= b[2]) {
-                found = `推奨：${box.name}`;
-                break;
-            }
+            if (req[0] <= b[0] && req[1] <= b[1] && req[2] <= b[2]) { found = `推奨：${box.name}`; break; }
         }
         document.getElementById('finalResult').innerText = found;
     }
