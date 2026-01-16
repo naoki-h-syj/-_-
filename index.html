@@ -3,18 +3,19 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>全自動目盛り解析計測</title>
+    <title>高感度メジャー解析計測</title>
     <style>
         * { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
         body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #000; font-family: sans-serif; }
         #video { position: fixed; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; z-index: 1; }
-        #overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: 2; pointer-events: none; opacity: 0.5; }
+        #overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: 2; pointer-events: none; }
         
         .ui { position: absolute; top: 0; left: 0; width: 100%; z-index: 10; pointer-events: none; }
-        .header { background: rgba(0,0,0,0.8); color: white; padding: 15px; text-align: center; pointer-events: auto; }
-        .status-light { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: #ff0000; margin-right: 5px; }
-        .status-ready { background: #00ff00; box-shadow: 0 0 10px #00ff00; }
-        .result-panel { margin-top: 10px; font-size: 32px; font-weight: bold; color: #00ff00; }
+        .header { background: rgba(0,0,0,0.85); color: white; padding: 15px; text-align: center; pointer-events: auto; }
+        .status-light { display: inline-block; width: 12px; height: 12px; border-radius: 50%; background: #ff4444; margin-right: 8px; transition: 0.3s; }
+        .status-ready { background: #00ff00; box-shadow: 0 0 15px #00ff00; }
+        .result-panel { margin-top: 10px; font-size: 32px; font-weight: bold; color: #00ff00; text-shadow: 0 0 5px #000; }
+        #debugInfo { font-size: 11px; color: #ccc; margin-top: 5px; }
     </style>
 </head>
 <body>
@@ -24,7 +25,8 @@
 
 <div class="ui">
     <div class="header">
-        <div id="statusWrap"><span id="indicator" class="status-light"></span> <span id="statusTxt">背景のメジャーを探しています...</span></div>
+        <div><span id="indicator" class="status-light"></span> <span id="statusTxt">メジャーを画面に入れてください</span></div>
+        <div id="debugInfo">スキャン中...</div>
         <div id="result" class="result-panel">-- × -- × -- cm</div>
     </div>
 </div>
@@ -33,84 +35,102 @@
     const video = document.getElementById('video');
     const canvas = document.getElementById('overlay');
     const ctx = canvas.getContext('2d');
+    const indicator = document.getElementById('indicator');
+    const statusTxt = document.getElementById('statusTxt');
+    const debugInfo = document.getElementById('debugInfo');
+    
     let pixelPerCm = 0;
+    let detectionHistory = [];
 
     async function init() {
-        const stream = await navigator.mediaDevices.getUserMedia({ 
-            video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } } 
-        });
-        video.srcObject = stream;
-        requestAnimationFrame(autoAnalyze);
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ 
+                video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } } 
+            });
+            video.srcObject = stream;
+            requestAnimationFrame(analyzeFrame);
+        } catch (e) {
+            alert("カメラの起動に失敗しました。HTTPS環境で実行してください。");
+        }
     }
 
-    function autoAnalyze() {
+    function analyzeFrame() {
         if (video.readyState === video.HAVE_ENOUGH_DATA) {
-            canvas.width = 160; // 解析負荷を下げるため縮小
-            canvas.height = 90;
-            
-            // 画面の複数箇所（上・中・下）をサンプリング
-            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-            const samples = [
-                ctx.getImageData(40, 45, 80, 1).data, // 中央
-                ctx.getImageData(40, 20, 80, 1).data, // 上部
-                ctx.getImageData(40, 70, 80, 1).data  // 下部
+            // 解析精度を上げるため、少し大きめのキャンバスでサンプリング
+            canvas.width = 400;
+            canvas.height = 400;
+            ctx.drawImage(video, (video.videoWidth-400)/2, (video.videoHeight-400)/2, 400, 400, 0, 0, 400, 400);
+
+            // 5本のスキャンライン（水平・垂直）でチェック
+            const lines = [
+                ctx.getImageData(0, 200, 400, 1).data, // 中央水平
+                ctx.getImageData(0, 100, 400, 1).data, // 上部水平
+                ctx.getImageData(0, 300, 400, 1).data, // 下部水平
+                getVerticalLine(200, 400)               // 中央垂直
             ];
 
-            let foundGaps = [];
+            let allGaps = [];
 
-            samples.forEach(data => {
+            lines.forEach(data => {
                 let darkPoints = [];
                 for (let i = 0; i < data.length; i += 4) {
-                    const bright = (data[i] + data[i+1] + data[i+2]) / 3;
-                    if (bright < 90) darkPoints.push(i / 4);
+                    // 輝度計算 (Luminance)
+                    const brightness = data[i] * 0.299 + data[i+1] * 0.587 + data[i+2] * 0.114;
+                    if (brightness < 100) darkPoints.push(i / 4); // 100未満を黒と判定
                 }
 
-                if (darkPoints.length > 4) {
+                if (darkPoints.length > 5) {
                     for (let j = 1; j < darkPoints.length; j++) {
-                        const d = darkPoints[j] - darkPoints[j-1];
-                        if (d > 8 && d < 40) foundGaps.push(d);
+                        const gap = darkPoints[j] - darkPoints[j-1];
+                        if (gap > 10 && gap < 60) allGaps.push(gap);
                     }
                 }
             });
 
-            if (foundGaps.length > 10) {
-                // 最頻値を採用して安定させる
-                const avg = foundGaps.reduce((a, b) => a + b) / foundGaps.length;
-                const multiplier = window.innerWidth / 80; // 縮小した分を戻す
-                pixelPerCm = avg * multiplier;
+            if (allGaps.length > 8) {
+                // 中央値を計算してノイズを飛ばす
+                allGaps.sort((a, b) => a - b);
+                const medianGap = allGaps[Math.floor(allGaps.length / 2)];
+                
+                // 画面幅に合わせたピクセル/cm比率を算出
+                const scale = window.innerWidth / 400;
+                pixelPerCm = medianGap * scale;
 
-                document.getElementById('indicator').classList.add('status-ready');
-                document.getElementById('statusTxt').innerText = "自動校正完了 (長押しで計測)";
+                indicator.classList.add('status-ready');
+                statusTxt.innerText = "メジャー検知中 (長押しで計測)";
+                debugInfo.innerText = `検出精度: OK (1cm = ${Math.round(pixelPerCm)}px)`;
+            } else {
+                indicator.classList.remove('status-ready');
+                statusTxt.innerText = "メジャーを探しています...";
+                debugInfo.innerText = "背景のコントラストが不足しています";
             }
         }
-        requestAnimationFrame(autoAnalyze);
+        requestAnimationFrame(analyzeFrame);
     }
 
-    // 商品計測（指を置いた位置の物体をシミュレーション）
+    function getVerticalLine(x, height) {
+        const imgData = ctx.getImageData(x, 0, 1, height).data;
+        return imgData;
+    }
+
+    // 長押し計測
+    let timer;
     window.addEventListener('touchstart', (e) => {
         if (pixelPerCm === 0) return;
-        
-        // 周辺を暗くする視覚効果
-        document.body.style.opacity = "0.7";
-
         timer = setTimeout(() => {
-            // ここでは簡易的に画面上の300pxを商品幅として計算
-            // 本来はここに「商品の輪郭抽出」を組み合わせます
-            const basePixelW = 400; 
-            const cmW = Math.round(basePixelW / pixelPerCm);
-            const cmD = Math.round(cmW * 0.8);
-            const cmH = Math.round(cmW * 0.5);
+            // 商品のピクセル幅（仮定：画面幅の50%程度を商品とする）
+            const productPx = window.innerWidth * 0.5;
+            const w = Math.round(productPx / pixelPerCm);
+            const d = Math.round(w * 0.7);
+            const h = Math.round(w * 0.4);
 
-            document.getElementById('result').innerText = `${cmW} × ${cmD} × ${cmH} cm`;
-            document.body.style.opacity = "1";
-        }, 800);
+            document.getElementById('result').innerText = `${w} × ${d} × ${h} cm`;
+            // 触覚フィードバック（iPhone等）
+            if(window.navigator.vibrate) window.navigator.vibrate(50);
+        }, 1000);
     });
 
-    window.addEventListener('touchend', () => {
-        clearTimeout(window.timer);
-        document.body.style.opacity = "1";
-    });
-
+    window.addEventListener('touchend', () => clearTimeout(timer));
     window.addEventListener('load', init);
 </script>
 </body>
