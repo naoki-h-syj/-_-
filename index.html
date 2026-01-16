@@ -3,24 +3,25 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>物流ハイブリッド計測</title>
+    <title>物流AIハイブリッド計測</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
     <style>
         * { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; touch-action: none; }
         body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #000; font-family: sans-serif; }
         #video { position: fixed; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; z-index: 1; }
-        #overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: 2; pointer-events: none; }
+        #overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: 2; pointer-events: none; transition: background 0.3s; }
+        #overlay.measuring { background: rgba(0,0,0,0.7); } /* 計測中の暗転 */
         
         .ui { position: absolute; top: 0; left: 0; width: 100%; z-index: 10; pointer-events: none; }
-        .header { background: rgba(0,0,0,0.85); color: white; padding: 20px; text-align: center; pointer-events: auto; }
+        .header { background: rgba(0,0,0,0.8); color: white; padding: 15px; text-align: center; pointer-events: auto; }
         
-        /* 状態表示ラベル */
-        .mode-badge { font-size: 14px; padding: 5px 15px; border-radius: 20px; font-weight: bold; transition: 0.3s; }
-        .mode-none { background: #555; }
-        .mode-auto { background: #ff9800; } /* 概算（オレンジ） */
-        .mode-high { background: #007bff; box-shadow: 0 0 10px #007bff; } /* 高精度（青） */
+        .mode-badge { font-size: 13px; padding: 4px 12px; border-radius: 20px; font-weight: bold; }
+        .m-none { background: #555; }
+        .m-auto { background: #ff9800; } 
+        .m-high { background: #007bff; box-shadow: 0 0 10px #007bff; }
 
-        .result-panel { margin-top: 15px; font-size: 36px; color: #00ff00; font-weight: bold; }
-        .sub-info { font-size: 11px; color: #aaa; margin-top: 5px; }
+        .result-panel { margin-top: 10px; font-size: 32px; color: #00ff00; font-weight: bold; }
     </style>
 </head>
 <body>
@@ -30,9 +31,9 @@
 
 <div class="ui">
     <div class="header">
-        <span id="modeLabel" class="mode-badge mode-none">準備中...</span>
+        <span id="modeLabel" class="mode-badge m-none">AI起動中...</span>
         <div id="result" class="result-panel">-- × -- cm</div>
-        <div id="debugMsg" class="sub-info">カメラを起動しています</div>
+        <div id="info" style="font-size:10px; color:#ccc; margin-top:5px;">商品を1秒長押し</div>
     </div>
 </div>
 
@@ -41,100 +42,87 @@
     const canvas = document.getElementById('overlay');
     const ctx = canvas.getContext('2d');
     
+    let model;
     let pixelPerCm = 0;
-    let devicePitch = 0; // 傾き
-    let currentMode = "none"; // none, auto(概算), high(高精度)
+    let detections = [];
+    let isHighMode = false;
 
     async function init() {
-        const stream = await navigator.mediaDevices.getUserMedia({ 
-            video: { facingMode: 'environment', width: { ideal: 1280 } } 
-        });
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
         video.srcObject = stream;
+        model = await cocoSsd.load();
+        document.getElementById('modeLabel').innerText = "準備完了";
         
-        // 角度センサーの許可（iOS対策）
-        if (window.DeviceOrientationEvent && DeviceOrientationEvent.requestPermission) {
-            window.addEventListener('click', () => {
-                DeviceOrientationEvent.requestPermission();
-            }, {once: true});
-        }
-        window.addEventListener('deviceorientation', (e) => { devicePitch = e.beta; });
-
-        video.onloadedmetadata = () => {
-            canvas.width = window.innerWidth;
-            canvas.height = window.innerHeight;
-            requestAnimationFrame(mainLoop);
-        };
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+        loop();
     }
 
-    function mainLoop() {
-        if (video.readyState === video.HAVE_ENOUGH_DATA) {
+    async function loop() {
+        // 1. AIで商品（物体）を検知
+        detections = await model.detect(video);
+        
+        // 2. メジャー（目盛り）の自動判別
+        const rulerGap = scanRuler();
+        const label = document.getElementById('modeLabel');
+
+        if (rulerGap > 0) {
+            pixelPerCm = rulerGap;
+            isHighMode = true;
+            label.innerText = "高精度モード (メジャー検知)";
+            label.className = "mode-badge m-high";
+        } else {
+            // メジャーがない場合は、標準的な距離(1.5m)を仮定した係数
+            pixelPerCm = 12; 
+            isHighMode = false;
+            label.innerText = "概算モード (目盛りなし)";
+            label.className = "mode-badge m-auto";
+        }
+
+        // 3. 検知枠の描画（薄く表示）
+        if (!document.getElementById('overlay').classList.contains('measuring')) {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
-            
-            // 1. メジャー検出を試みる
-            const detectedGap = scanForRuler();
-            
-            if (detectedGap > 0) {
-                // 【高精度モード】
-                pixelPerCm = detectedGap;
-                currentMode = "high";
-                updateUI("高精度モード (メジャー検知中)", "mode-high");
-            } else {
-                // 【概算モード】（角度から推測）
-                // 持ち手の高さを120cm、角度45度付近での標準px比率を計算
-                const angleRad = (devicePitch || 45) * (Math.PI / 180);
-                pixelPerCm = 15 * Math.sin(angleRad); // 簡易的な概算ロジック
-                currentMode = "auto";
-                updateUI("概算モード (角度から推測)", "mode-auto");
-            }
+            detections.forEach(d => {
+                ctx.strokeStyle = isHighMode ? "rgba(0,123,255,0.5)" : "rgba(255,152,0,0.5)";
+                ctx.strokeRect(d.bbox[0], d.bbox[1], d.bbox[2], d.bbox[3]);
+            });
         }
-        requestAnimationFrame(mainLoop);
+        
+        requestAnimationFrame(loop);
     }
 
-    function scanForRuler() {
-        // 中央付近をサンプリング
-        const sampleY = canvas.height * 0.5;
-        const tempCanvas = document.createElement('canvas');
-        tempCanvas.width = canvas.width; tempCanvas.height = 1;
-        const tCtx = tempCanvas.getContext('2d');
-        tCtx.drawImage(video, 0, sampleY * (video.videoHeight/canvas.height), video.videoWidth, 1, 0, 0, canvas.width, 1);
-        const data = tCtx.getImageData(0, 0, canvas.width, 1).data;
-
-        let darkPoints = [];
-        for (let i = 0; i < data.length; i += 4) {
-            if ((data[i] + data[i+1] + data[i+2]) / 3 < 90) darkPoints.push(i / 4);
+    function scanRuler() {
+        // 簡易的な目盛りスキャン
+        const tCanvas = document.createElement('canvas');
+        tCanvas.width = 100; tCanvas.height = 1;
+        const tCtx = tCanvas.getContext('2d');
+        tCtx.drawImage(video, video.videoWidth/2-50, video.videoHeight/2, 100, 1, 0, 0, 100, 1);
+        const data = tCtx.getImageData(0,0,100,1).data;
+        let points = [];
+        for(let i=0; i<data.length; i+=4) {
+            if((data[i]+data[i+1]+data[i+2])/3 < 100) points.push(i/4);
         }
-
-        let gaps = [];
-        for (let j = 1; j < darkPoints.length; j++) {
-            const d = darkPoints[j] - darkPoints[j-1];
-            if (d > 15 && d < 80) gaps.push(d);
-        }
-
-        if (gaps.length >= 4) {
-            // 検知箇所を青く強調
-            ctx.strokeStyle = "#007bff"; ctx.lineWidth = 2;
-            ctx.strokeRect(0, sampleY-10, canvas.width, 20);
-            return gaps.reduce((a, b) => a + b) / gaps.length;
+        if(points.length > 5) {
+            return (points[points.length-1] - points[0]) / points.length * (window.innerWidth / 100);
         }
         return 0;
     }
 
-    function updateUI(msg, className) {
-        const label = document.getElementById('modeLabel');
-        label.innerText = msg;
-        label.className = "mode-badge " + className;
-        document.getElementById('debugMsg').innerText = `角度: ${Math.round(devicePitch)}° / 基準px: ${Math.round(pixelPerCm)}`;
-    }
+    // --- 商品選択と計測 ---
+    window.addEventListener('touchstart', (e) => {
+        const tx = e.touches[0].clientX;
+        const ty = e.touches[0].clientY;
 
-    window.addEventListener('touchstart', () => {
-        if (pixelPerCm < 1) return;
-        const productPx = 350; // 仮の検知幅
-        const w = Math.round(productPx / pixelPerCm);
-        const d = Math.round(w * 0.8);
-        document.getElementById('result').innerText = `${w} × ${d} cm`;
-    });
+        longTimer = setTimeout(() => {
+            // 指の位置にある物体を特定
+            const target = detections.find(d => 
+                tx > d.bbox[0] && tx < d.bbox[0] + d.bbox[2] &&
+                ty > d.bbox[1] && ty < d.bbox[1] + d.bbox[3]
+            );
 
-    window.addEventListener('load', init);
-</script>
-</body>
-</html>
+            if (target) {
+                // 商品の選択エフェクト
+                document.getElementById('overlay').classList.add('measuring');
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                ctx.strokeStyle = "#00ff00";
+                ctx.lineWidth =
