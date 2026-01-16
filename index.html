@@ -3,22 +3,24 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>高精度・メジャー可視化計測</title>
+    <title>物流ハイブリッド計測</title>
     <style>
-        * { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
+        * { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; touch-action: none; }
         body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #000; font-family: sans-serif; }
-        
-        /* ズームを防ぎ、全体を表示 */
         #video { position: fixed; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; z-index: 1; }
-        
-        /* メジャー検知を重ねるキャンバス */
         #overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: 2; pointer-events: none; }
         
         .ui { position: absolute; top: 0; left: 0; width: 100%; z-index: 10; pointer-events: none; }
-        .header { background: rgba(0,0,0,0.8); color: white; padding: 15px; text-align: center; pointer-events: auto; }
-        .status-badge { font-size: 12px; padding: 4px 12px; border-radius: 10px; background: #ff4444; }
-        .ready { background: #007bff; }
-        .result-panel { margin-top: 10px; font-size: 32px; color: #00ff00; font-weight: bold; }
+        .header { background: rgba(0,0,0,0.85); color: white; padding: 20px; text-align: center; pointer-events: auto; }
+        
+        /* 状態表示ラベル */
+        .mode-badge { font-size: 14px; padding: 5px 15px; border-radius: 20px; font-weight: bold; transition: 0.3s; }
+        .mode-none { background: #555; }
+        .mode-auto { background: #ff9800; } /* 概算（オレンジ） */
+        .mode-high { background: #007bff; box-shadow: 0 0 10px #007bff; } /* 高精度（青） */
+
+        .result-panel { margin-top: 15px; font-size: 36px; color: #00ff00; font-weight: bold; }
+        .sub-info { font-size: 11px; color: #aaa; margin-top: 5px; }
     </style>
 </head>
 <body>
@@ -28,9 +30,9 @@
 
 <div class="ui">
     <div class="header">
-        <span id="status" class="status-badge">メジャー未検知</span>
-        <div id="result" class="result-panel">-- × -- × -- cm</div>
-        <div style="font-size:10px; color:#aaa; margin-top:5px;">青い線が目盛りに重なると計測可能</div>
+        <span id="modeLabel" class="mode-badge mode-none">準備中...</span>
+        <div id="result" class="result-panel">-- × -- cm</div>
+        <div id="debugMsg" class="sub-info">カメラを起動しています</div>
     </div>
 </div>
 
@@ -38,100 +40,98 @@
     const video = document.getElementById('video');
     const canvas = document.getElementById('overlay');
     const ctx = canvas.getContext('2d');
+    
     let pixelPerCm = 0;
+    let devicePitch = 0; // 傾き
+    let currentMode = "none"; // none, auto(概算), high(高精度)
 
     async function init() {
-        // 解像度指定を柔軟にし、ズームを防止
         const stream = await navigator.mediaDevices.getUserMedia({ 
-            video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } } 
+            video: { facingMode: 'environment', width: { ideal: 1280 } } 
         });
         video.srcObject = stream;
+        
+        // 角度センサーの許可（iOS対策）
+        if (window.DeviceOrientationEvent && DeviceOrientationEvent.requestPermission) {
+            window.addEventListener('click', () => {
+                DeviceOrientationEvent.requestPermission();
+            }, {once: true});
+        }
+        window.addEventListener('deviceorientation', (e) => { devicePitch = e.beta; });
+
         video.onloadedmetadata = () => {
             canvas.width = window.innerWidth;
             canvas.height = window.innerHeight;
-            requestAnimationFrame(analyze);
+            requestAnimationFrame(mainLoop);
         };
     }
 
-    function analyze() {
+    function mainLoop() {
         if (video.readyState === video.HAVE_ENOUGH_DATA) {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
             
-            // 画面の縦方向に3本のスキャン領域を設定
-            const scanLines = [0.3, 0.5, 0.7]; 
-            let bestGap = 0;
-
-            scanLines.forEach(rate => {
-                const y = canvas.height * rate;
-                const rowData = getVideoRowData(y);
-                const gaps = findEqualSpacedLines(rowData, y);
-                
-                if (gaps.length >= 4) { // 4本以上の等間隔な線が見つかったら採用
-                    bestGap = gaps.reduce((a, b) => a + b) / gaps.length;
-                    // 検知した場所に青いラインを引く
-                    ctx.strokeStyle = "rgba(0, 123, 255, 0.8)";
-                    ctx.lineWidth = 4;
-                    ctx.beginPath();
-                    ctx.moveTo(0, y);
-                    ctx.lineTo(canvas.width, y);
-                    ctx.stroke();
-                }
-            });
-
-            if (bestGap > 0) {
-                pixelPerCm = bestGap;
-                document.getElementById('status').innerText = "メジャー検知中";
-                document.getElementById('status').className = "status-badge ready";
+            // 1. メジャー検出を試みる
+            const detectedGap = scanForRuler();
+            
+            if (detectedGap > 0) {
+                // 【高精度モード】
+                pixelPerCm = detectedGap;
+                currentMode = "high";
+                updateUI("高精度モード (メジャー検知中)", "mode-high");
             } else {
-                document.getElementById('status').innerText = "メジャー未検知";
-                document.getElementById('status').className = "status-badge";
+                // 【概算モード】（角度から推測）
+                // 持ち手の高さを120cm、角度45度付近での標準px比率を計算
+                const angleRad = (devicePitch || 45) * (Math.PI / 180);
+                pixelPerCm = 15 * Math.sin(angleRad); // 簡易的な概算ロジック
+                currentMode = "auto";
+                updateUI("概算モード (角度から推測)", "mode-auto");
             }
         }
-        requestAnimationFrame(analyze);
+        requestAnimationFrame(mainLoop);
     }
 
-    // 特定の高さのピクセルデータを取得
-    function getVideoRowData(y) {
+    function scanForRuler() {
+        // 中央付近をサンプリング
+        const sampleY = canvas.height * 0.5;
         const tempCanvas = document.createElement('canvas');
-        tempCanvas.width = canvas.width;
-        tempCanvas.height = 1;
+        tempCanvas.width = canvas.width; tempCanvas.height = 1;
         const tCtx = tempCanvas.getContext('2d');
-        // ビデオの該当する高さをサンプリング
-        tCtx.drawImage(video, 0, y * (video.videoHeight/canvas.height), video.videoWidth, 1, 0, 0, canvas.width, 1);
-        return tCtx.getImageData(0, 0, canvas.width, 1).data;
-    }
+        tCtx.drawImage(video, 0, sampleY * (video.videoHeight/canvas.height), video.videoWidth, 1, 0, 0, canvas.width, 1);
+        const data = tCtx.getImageData(0, 0, canvas.width, 1).data;
 
-    // 等間隔の線を抽出するロジック
-    function findEqualSpacedLines(data, visualY) {
         let darkPoints = [];
         for (let i = 0; i < data.length; i += 4) {
-            const brightness = (data[i] + data[i+1] + data[i+2]) / 3;
-            if (brightness < 90) { // 黒い線の判定
-                darkPoints.push(i / 4);
-                // 画面上に検知したポイントを小さく表示（デバッグ用）
-                ctx.fillStyle = "cyan";
-                ctx.fillRect(i/4, visualY - 10, 1, 20);
-            }
+            if ((data[i] + data[i+1] + data[i+2]) / 3 < 90) darkPoints.push(i / 4);
         }
 
         let gaps = [];
         for (let j = 1; j < darkPoints.length; j++) {
             const d = darkPoints[j] - darkPoints[j-1];
-            if (d > 15 && d < 100) gaps.push(d); // 1cmあたりのピクセル幅想定
+            if (d > 15 && d < 80) gaps.push(d);
         }
-        
-        // 間隔のバラつきが少ないものだけを抽出
-        if (gaps.length < 4) return [];
-        return gaps;
+
+        if (gaps.length >= 4) {
+            // 検知箇所を青く強調
+            ctx.strokeStyle = "#007bff"; ctx.lineWidth = 2;
+            ctx.strokeRect(0, sampleY-10, canvas.width, 20);
+            return gaps.reduce((a, b) => a + b) / gaps.length;
+        }
+        return 0;
+    }
+
+    function updateUI(msg, className) {
+        const label = document.getElementById('modeLabel');
+        label.innerText = msg;
+        label.className = "mode-badge " + className;
+        document.getElementById('debugMsg').innerText = `角度: ${Math.round(devicePitch)}° / 基準px: ${Math.round(pixelPerCm)}`;
     }
 
     window.addEventListener('touchstart', () => {
-        if (pixelPerCm === 0) return;
-        // 仮の商品サイズ計算（画面中央400px分を計測）
-        const w = Math.round(400 / pixelPerCm);
-        const d = Math.round(w * 0.7);
-        const h = Math.round(w * 0.5);
-        document.getElementById('result').innerText = `${w} × ${d} × ${h} cm`;
+        if (pixelPerCm < 1) return;
+        const productPx = 350; // 仮の検知幅
+        const w = Math.round(productPx / pixelPerCm);
+        const d = Math.round(w * 0.8);
+        document.getElementById('result').innerText = `${w} × ${d} cm`;
     });
 
     window.addEventListener('load', init);
