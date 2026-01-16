@@ -3,61 +3,67 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>物流ARスワイプ計測</title>
+    <title>物流スワイプ計測</title>
     <style>
-        body { margin: 0; overflow: hidden; font-family: sans-serif; background: #000; }
-        canvas { display: block; }
-        
+        /* カメラ映像を全画面で背面に固定 */
+        body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #000; }
+        #video {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            object-fit: cover; z-index: 1;
+        }
+        /* 描画用キャンバスをビデオの上に重ねる */
+        #drawCanvas {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            z-index: 2; touch-action: none;
+        }
+        /* UIを最前面に配置 */
         .ui-layer {
-            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
-            pointer-events: none; z-index: 10;
+            position: absolute; top: 0; left: 0; width: 100%;
+            z-index: 3; pointer-events: none;
         }
         .info-panel {
-            position: absolute; top: 0; width: 100%; background: rgba(0,0,0,0.8);
-            color: white; padding: 15px 0; text-align: center; pointer-events: auto;
+            background: rgba(0,0,0,0.7); color: white; padding: 20px 0;
+            text-align: center; pointer-events: auto;
         }
-        .guide { font-size: 18px; font-weight: bold; margin-bottom: 5px; }
-        .measure-grid { display: flex; justify-content: space-around; font-size: 14px; }
-        
-        /* 色の定義 */
-        .w-text { color: #4dabf7; border-bottom: 3px solid #0000ff; } /* 横: 青 */
-        .d-text { color: #ff8787; border-bottom: 3px solid #ff0000; } /* 縦: 赤 */
-        .h-text { color: #8ce99a; border-bottom: 3px solid #00ff00; } /* 高: 緑 */
-
-        .result { margin-top: 10px; font-size: 22px; color: #00ff00; font-weight: bold; }
+        .guide { font-size: 18px; font-weight: bold; margin-bottom: 10px; }
+        .measure-grid { display: flex; justify-content: space-around; font-size: 15px; }
+        .w-text { color: #4dabf7; font-weight: bold; }
+        .d-text { color: #ff8787; font-weight: bold; }
+        .h-text { color: #8ce99a; font-weight: bold; }
+        .result { margin-top: 15px; font-size: 24px; color: #00ff00; font-weight: bold; }
         .reset-btn {
-            position: absolute; bottom: 30px; left: 50%; transform: translateX(-50%);
-            padding: 12px 30px; border-radius: 25px; background: white; border: none;
-            font-weight: bold; pointer-events: auto;
+            position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%);
+            padding: 15px 40px; border-radius: 30px; background: white; border: none;
+            font-weight: bold; font-size: 16px; z-index: 4; pointer-events: auto;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.3);
         }
-        /* 描画用キャンバス */
-        #drawCanvas { position: absolute; top: 0; left: 0; pointer-events: auto; }
     </style>
 </head>
 <body>
 
-<video id="video" autoplay playsinline style="width:100%; height:100%; object-fit:cover;"></video>
+<video id="video" autoplay playsinline></video>
 <canvas id="drawCanvas"></canvas>
 
 <div class="ui-layer">
     <div class="info-panel">
-        <div id="guideMsg" class="guide">指で <span id="targetName" style="text-decoration:underline;">横幅</span> をなぞってください</div>
+        <div id="guideMsg" class="guide">指で <span id="targetName" style="text-decoration:underline; color:#4dabf7;">横幅</span> をなぞってください</div>
         <div class="measure-grid">
             <span id="val-w" class="w-text">横: --cm</span>
             <span id="val-d" class="d-text">縦: --cm</span>
             <span id="val-h" class="h-text">高: --cm</span>
         </div>
         <div id="finalResult" class="result"></div>
-        <button class="reset-btn" onclick="location.reload()">やり直す</button>
     </div>
 </div>
+
+<button class="reset-btn" onclick="location.reload()">やり直す</button>
 
 <script>
     const video = document.getElementById('video');
     const canvas = document.getElementById('drawCanvas');
     const ctx = canvas.getContext('2d');
     
-    let step = 0; // 0:W, 1:D, 2:H
+    let step = 0; 
     let isDrawing = false;
     let startX, startY;
     let dims = { w: 0, d: 0, h: 0 };
@@ -68,94 +74,33 @@
         { label: "高さ", color: "#00ff00" }
     ];
 
-    // カメラ起動
-    navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } })
-        .then(stream => { video.srcObject = stream; })
-        .catch(err => alert("カメラを許可してください"));
+    // カメラ起動処理
+    async function startCamera() {
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ 
+                video: { facingMode: 'environment' }, 
+                audio: false 
+            });
+            video.srcObject = stream;
+        } catch (err) {
+            alert("カメラの起動に失敗しました。ブラウザの設定でカメラを許可してください。");
+        }
+    }
 
     function resize() {
         canvas.width = window.innerWidth;
         canvas.height = window.innerHeight;
     }
-    window.onresize = resize;
-    resize();
 
-    // スワイプ操作
+    window.addEventListener('load', () => {
+        startCamera();
+        resize();
+    });
+    window.addEventListener('resize', resize);
+
+    // スワイプ操作（Touch Events）
     canvas.addEventListener('touchstart', e => {
         if (step > 2) return;
         isDrawing = true;
         startX = e.touches[0].clientX;
         startY = e.touches[0].clientY;
-    });
-
-    canvas.addEventListener('touchmove', e => {
-        if (!isDrawing) return;
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        const curX = e.touches[0].clientX;
-        const curY = e.touches[0].clientY;
-        
-        // ラインの描画
-        ctx.beginPath();
-        ctx.moveTo(startX, startY);
-        ctx.lineTo(curX, curY);
-        ctx.strokeStyle = config[step].color;
-        ctx.lineWidth = 5;
-        ctx.lineCap = "round";
-        ctx.stroke();
-    });
-
-    canvas.addEventListener('touchend', e => {
-        if (!isDrawing) return;
-        isDrawing = false;
-        
-        const endX = e.changedTouches[0].clientX;
-        const endY = e.changedTouches[0].clientY;
-        
-        // 画面上のピクセル距離からcmを推定 (iPhoneの画面幅を基準とした簡易換算)
-        const pixelDist = Math.sqrt(Math.pow(endX - startX, 2) + Math.pow(endY - startY, 2));
-        const estimatedCm = Math.round(pixelDist * 0.15); // 0.15は調整係数
-        
-        saveDim(estimatedCm);
-        step++;
-        ctx.clearRect(0, 0, canvas.width, canvas.height); // ラインを消す（次のステップへ）
-        updateUI();
-    });
-
-    function saveDim(val) {
-        const v = Math.max(5, val);
-        if (step === 0) dims.w = v;
-        if (step === 1) dims.d = v;
-        if (step === 2) dims.h = v;
-    }
-
-    function updateUI() {
-        document.getElementById('val-w').innerText = `横: ${dims.w || '--'}cm`;
-        document.getElementById('val-d').innerText = `縦: ${dims.d || '--'}cm`;
-        document.getElementById('val-h').innerText = `高: ${dims.h || '--'}cm`;
-
-        if (step <= 2) {
-            document.getElementById('targetName').innerText = config[step].label;
-            document.getElementById('targetName').style.color = config[step].color;
-        } else {
-            document.getElementById('guideMsg').innerText = "計測完了！";
-            calculateBox();
-        }
-    }
-
-    function calculateBox() {
-        const boxList = [
-            { name: "サイズ100", w: 45, d: 35, h: 20 },
-            { name: "サイズ120", w: 55, d: 40, h: 25 },
-            { name: "サイズ140", w: 65, d: 50, h: 25 },
-            { name: "サイズ160", w: 75, d: 55, h: 30 }
-        ];
-        const req = [dims.w + 3, dims.d + 3, dims.h + 3].sort((a,b) => a-b);
-        let found = "適合なし";
-        for (let box of boxList) {
-            const b = [box.w, box.d, box.h].sort((a,b) => a-b);
-            if (req[0] <= b[0] && req[1] <= b[1] && req[2] <= b[2]) {
-                found = `推奨：${box.name}`;
-                break;
-            }
-        }
-        document.getElementById('finalResult').innerText = found;
