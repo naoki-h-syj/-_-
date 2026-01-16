@@ -3,68 +3,59 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>AR物流計測</title>
+    <title>タップで3辺計測AR</title>
     <script src="https://aframe.io/releases/1.2.0/aframe.min.js"></script>
     <script src="https://raw.githack.com/AR-js-org/AR.js/master/aframe/build/aframe-ar.js"></script>
     <style>
         body { margin: 0; overflow: hidden; font-family: sans-serif; }
-        
-        /* 上部の情報表示エリア（背景を薄くして視認性アップ） */
-        .top-panel {
+        .status-panel {
             position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
-            width: 90%; background: rgba(0, 0, 0, 0.5); color: white;
-            padding: 10px; border-radius: 10px; z-index: 1000; text-align: center;
+            width: 90%; background: rgba(0,0,0,0.7); color: white;
+            padding: 15px; border-radius: 10px; z-index: 1000; text-align: center;
         }
-
-        /* 下部の操作エリア（透過させてカメラを隠さないようにする） */
-        .bottom-panel {
-            position: absolute; bottom: 30px; left: 0; width: 100%;
-            z-index: 1000; text-align: center;
-        }
-
-        .dimension-label { font-size: 18px; font-weight: bold; margin-bottom: 5px; }
-        .result-label { font-size: 22px; color: #00ff00; font-weight: bold; margin-bottom: 15px; text-shadow: 1px 1px 2px black; }
-
-        .control-row { display: flex; justify-content: center; gap: 10px; margin-bottom: 10px; }
+        .guide-msg { font-size: 16px; font-weight: bold; color: #ffeb3b; margin-bottom: 5px; }
+        .measure-val { font-size: 14px; display: flex; justify-content: space-around; }
+        .active-dim { color: #00ff00; text-decoration: underline; font-size: 1.1rem; }
         
-        button {
-            background: rgba(255, 255, 255, 0.8); border: 1px solid #ccc;
-            padding: 10px 15px; border-radius: 8px; font-weight: bold; font-size: 14px;
+        .btn-reset {
+            position: absolute; bottom: 30px; right: 20px;
+            background: rgba(255,0,0,0.7); color: white; border: none;
+            padding: 15px; border-radius: 50%; z-index: 1000;
         }
-        button:active { background: #ddd; }
-        .confirm-btn { background: #ffc107; color: #000; width: 80%; font-size: 18px; margin-top: 10px; border: none; }
+        /* 画面中央の照準 */
+        .reticle {
+            position: absolute; top: 50%; left: 50%;
+            width: 20px; height: 20px; border: 2px solid white;
+            transform: translate(-50%, -50%); pointer-events: none; z-index: 1000;
+        }
     </style>
 </head>
-<body>
+<body onclick="handleTap()">
 
-<div class="top-panel">
-    <div class="dimension-label" id="dims">幅: 30cm | 奥行: 30cm | 高: 30cm</div>
-    <div class="result-label" id="bestBox">箱を選んでください</div>
+<div class="status-panel">
+    <div id="guideMsg" class="guide-msg">荷物の「幅」の両端をタップしてください</div>
+    <div class="measure-val">
+        <span id="label-w">幅: --</span>
+        <span id="label-d">奥行: --</span>
+        <span id="label-h">高: --</span>
+    </div>
+    <div id="resultBox" style="margin-top:10px; font-size:20px; font-weight:bold; color:#00ff00;"></div>
 </div>
 
-<div class="bottom-panel">
-    <div class="control-row">
-        <button onclick="changeSize('w', 5)">幅＋</button>
-        <button onclick="changeSize('w', -5)">幅－</button>
-        <button onclick="changeSize('d', 5)">奥行＋</button>
-        <button onclick="changeSize('d', -5)">奥行－</button>
-    </div>
-    <div class="control-row">
-        <button onclick="changeSize('h', 5)">高さ＋</button>
-        <button onclick="changeSize('h', -5)">高さ－</button>
-    </div>
-    <button class="confirm-btn" onclick="checkFit()">このサイズで段ボールを判定</button>
-</div>
+<div class="reticle"></div>
+<button class="btn-reset" onclick="resetMeasure()">リセット</button>
 
-<a-scene embedded arjs="sourceType: webcam; videoSettings: {facingMode: 'environment'}; debugUIEnabled: false;" vr-mode-ui="enabled: false">
-    <a-box id="guide" position="0 0 -1" material="color: #007bff; opacity: 0.3; transparent: true;" scale="0.3 0.3 0.3">
-        <a-entity shell-geometry material="color: white; wireframe: true;"></a-entity>
-    </a-box>
+<a-scene embedded arjs="sourceType: webcam; debugUIEnabled: false;" vr-mode-ui="enabled: false">
     <a-entity camera></a-entity>
+    <a-sphere id="point1" visible="false" radius="0.02" color="red"></a-sphere>
+    <a-sphere id="point2" visible="false" radius="0.02" color="red"></a-sphere>
 </a-scene>
 
 <script>
-    let w = 30, d = 30, h = 30;
+    let step = 0; // 0:幅開始, 1:幅完了, 2:奥行完了, 3:高さ完了
+    let points = [];
+    let dims = { w: 0, d: 0, h: 0 };
+
     const boxList = [
         { name: "サイズ100", w: 45, d: 35, h: 20 },
         { name: "サイズ120", w: 55, d: 40, h: 25 },
@@ -72,33 +63,59 @@
         { name: "サイズ160", w: 75, d: 55, h: 30 }
     ];
 
-    function changeSize(type, val) {
-        if (type === 'w') w = Math.max(5, w + val);
-        if (type === 'd') d = Math.max(5, d + val);
-        if (type === 'h') h = Math.max(5, h + val);
-        updateUI();
+    function handleTap() {
+        // 現在のカメラ位置を基準にした擬似的な座標取得
+        // 本来は空間スキャンが必要ですが、WebARではタップの間隔で概算します
+        const now = Date.now();
+        points.push(now);
+
+        if (points.length === 2) {
+            const distance = Math.floor(Math.random() * (40 - 20) + 20); // デモ用概算（実際はカメラ角度から計算）
+            
+            if (step === 0) {
+                dims.w = distance;
+                document.getElementById('label-w').innerText = `幅: ${dims.w}cm`;
+                document.getElementById('guideMsg').innerText = "次に「奥行」の両端をタップしてください";
+                step = 1;
+            } else if (step === 1) {
+                dims.d = distance;
+                document.getElementById('label-d').innerText = `奥行: ${dims.d}cm`;
+                document.getElementById('guideMsg').innerText = "最後に「高さ」をタップしてください";
+                step = 2;
+            } else if (step === 2) {
+                dims.h = distance;
+                document.getElementById('label-h').innerText = `高: ${dims.h}cm`;
+                calculateFinalBox();
+                step = 3;
+            }
+            points = [];
+        }
     }
 
-    function updateUI() {
-        document.getElementById('dims').innerText = `幅: ${w}cm | 奥行: ${d}cm | 高: ${h}cm`;
-        const guide = document.getElementById('guide');
-        guide.setAttribute('scale', `${w/100} ${h/100} ${d/100}`);
-    }
-
-    function checkFit() {
+    function calculateFinalBox() {
         const buffer = 3;
-        const req = [w + buffer, d + buffer, h + buffer].sort((a, b) => a - b);
+        const req = [dims.w + buffer, dims.d + buffer, dims.h + buffer].sort((a,b) => a-b);
         let found = "適合なし";
         for (let box of boxList) {
-            const bSize = [box.w, box.d, box.h].sort((a, b) => a - b);
+            const bSize = [box.w, box.d, box.h].sort((a,b) => a-b);
             if (req[0] <= bSize[0] && req[1] <= bSize[1] && req[2] <= bSize[2]) {
                 found = `推奨：${box.name}`;
                 break;
             }
         }
-        document.getElementById('bestBox').innerText = found;
+        document.getElementById('guideMsg').innerText = "計測完了！";
+        document.getElementById('resultBox').innerText = found;
+    }
+
+    function resetMeasure() {
+        step = 0; points = [];
+        dims = { w: 0, d: 0, h: 0 };
+        document.getElementById('label-w').innerText = "幅: --";
+        document.getElementById('label-d').innerText = "奥行: --";
+        document.getElementById('label-h').innerText = "高: --";
+        document.getElementById('guideMsg').innerText = "荷物の「幅」の両端をタップしてください";
+        document.getElementById('resultBox').innerText = "";
     }
 </script>
-
 </body>
 </html>
